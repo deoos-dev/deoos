@@ -1,4 +1,4 @@
-# DEOOS — Durable Execution on Object Storage
+# DEOOS - Durable Execution On Object Storage
 
 One Rust execution core, Python and TypeScript SDKs, and S3-compatible storage for authoritative state. Two deployment options:
 
