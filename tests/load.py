@@ -4,6 +4,8 @@
 Requires built SDKs, Node, boto3, and existing local RustFS on port 19000.
 AWS runs require verified EC2 IMDSv2 placement and an expected account; this script
 creates only a temporary test bucket, never compute/network infrastructure.
+Pass --bucket to use a precreated empty target: the harness owns only its fresh
+load/<run UUID>/ namespace and never creates or deletes that bucket.
 """
 import argparse
 import collections
@@ -32,6 +34,174 @@ from use_cases import IntegrationFixture, stop, wait
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "clients/python"))
 from deoos import Client
+
+
+class OccupiedBucketError(RuntimeError):
+    pass
+
+
+def require_bucket_region(s3, bucket, region):
+    actual = s3.get_bucket_location(Bucket=bucket).get("LocationConstraint")
+    actual = {None: "us-east-1", "EU": "eu-west-1"}.get(actual, actual)
+    if actual != region:
+        raise ValueError("precreated bucket region must match verified EC2 region")
+    return actual
+
+
+class PrecreatedBucket:
+    """Admit an empty controller target before acquiring namespace ownership."""
+    def __init__(self, s3, bucket, prefix):
+        self.s3, self.bucket, self.prefix = s3, bucket, prefix
+        if (not prefix.startswith("load/") or len(prefix) != 37
+                or any(char not in "0123456789abcdef" for char in prefix[5:])):
+            raise ValueError("expected the exact generated load run prefix")
+        self.owned = False
+
+    def admit(self):
+        if self.s3.list_objects_v2(Bucket=self.bucket, MaxKeys=1).get("Contents"):
+            raise OccupiedBucketError("precreated load target must be empty")
+        self.owned = True
+
+    def cleanup(self):
+        if not self.owned:
+            return {"cleaned": False, "cleanup_skipped": "namespace ownership not acquired"}
+        boundary = self.prefix + "/"
+        for page in self.s3.get_paginator("list_objects_v2").paginate(Bucket=self.bucket, Prefix=boundary):
+            objects = [{"Key": obj["Key"]} for obj in page.get("Contents", [])]
+            if any(not obj["Key"].startswith(boundary) for obj in objects):
+                raise RuntimeError("listing escaped the owned namespace")
+            if objects and self.s3.delete_objects(Bucket=self.bucket, Delete={"Objects": objects}).get("Errors"):
+                raise RuntimeError("owned load namespace cleanup failed")
+        if self.s3.list_objects_v2(Bucket=self.bucket, Prefix=boundary, MaxKeys=1).get("Contents"):
+            raise RuntimeError("owned load namespace still contains objects")
+        self.s3.head_bucket(Bucket=self.bucket)
+        return {"cleaned": True, "external_bucket_retained": True, "owned_prefix_absent": True}
+
+
+def bucket_contract_tests():
+    """Real local storage plus one injected delete failure; never contacts AWS."""
+    s3, _, _, _ = storage("rustfs", "direct")
+    bucket = "deoos-load-contract-" + uuid.uuid4().hex[:20]
+    created, checks, calls = False, [], []
+    try:
+        created = True
+        s3.create_bucket(Bucket=bucket)
+        s3.meta.events.register("before-call.s3", lambda model, **kwargs: calls.append(model.name))
+        prefix = "load/" + uuid.uuid4().hex
+        lease = PrecreatedBucket(s3, bucket, prefix)
+        lease.admit()
+        s3.put_object(Bucket=bucket, Key=prefix + "/tasks/owned", Body=b"owned")
+        s3.put_object(Bucket=bucket, Key=prefix + "-neighbor/keep", Body=b"unrelated")
+        calls.clear()
+        assert lease.cleanup() == {"cleaned": True, "external_bucket_retained": True, "owned_prefix_absent": True}
+        assert s3.get_object(Bucket=bucket, Key=prefix + "-neighbor/keep")["Body"].read() == b"unrelated"
+        assert not {"CreateBucket", "DeleteBucket"}.intersection(calls)
+        checks.append("owned prefix removed; slash-neighbor sentinel and external bucket preserved")
+
+        occupied = PrecreatedBucket(s3, bucket, "load/" + uuid.uuid4().hex)
+        s3.put_object(Bucket=bucket, Key=occupied.prefix + "/existing", Body=b"existing")
+        calls.clear()
+        try:
+            occupied.admit()
+        except OccupiedBucketError:
+            pass
+        else:
+            raise AssertionError("occupied external bucket was admitted")
+        assert not occupied.owned and not occupied.cleanup()["cleaned"]
+        assert s3.get_object(Bucket=bucket, Key=occupied.prefix + "/existing")["Body"].read() == b"existing"
+        assert not {"CreateBucket", "DeleteBucket", "DeleteObjects", "DeleteObject"}.intersection(calls)
+        checks.append("occupied target rejected before ownership; no cleanup mutation")
+
+        # Fixture owner removes its sentinels before the independent failure case.
+        for key in (prefix + "-neighbor/keep", occupied.prefix + "/existing"):
+            s3.delete_object(Bucket=bucket, Key=key)
+        class RejectDelete:
+            def __getattr__(self, name):
+                return getattr(s3, name)
+            def delete_objects(self, **kwargs):
+                return {"Errors": [{"Code": "InjectedFailure"}]}
+        failure = PrecreatedBucket(RejectDelete(), bucket, "load/" + uuid.uuid4().hex)
+        failure.admit()
+        key = failure.prefix + "/tasks/kept-after-failure"
+        s3.put_object(Bucket=bucket, Key=key, Body=b"not deleted")
+        try:
+            failure.cleanup()
+        except RuntimeError:
+            pass
+        else:
+            raise AssertionError("cleanup failure was reported as clean")
+        assert s3.get_object(Bucket=bucket, Key=key)["Body"].read() == b"not deleted"
+        checks.append("injected delete failure surfaces; retained object prevents false cleanup success")
+        s3.delete_object(Bucket=bucket, Key=key)
+
+        # Exercise the reporting/ownership path, with no AWS request or worker.
+        import contextlib
+        import io
+        from unittest.mock import patch
+        def main_fault(store, backend, expected_error, round_effect=None):
+            capture = io.StringIO()
+            class Driver:
+                def __init__(self, **kwargs):
+                    pass
+                def close(self):
+                    pass
+            with patch.dict(os.environ, dict(os.environ), clear=True), \
+                    patch.object(sys, "argv", ["load.py", "--backend", backend, "--bucket", bucket,
+                                               "--mode", "library", "--workers", "1", "--tasks", "1"]), \
+                    patch(__name__ + ".storage", return_value=(store, {}, "us-east-1", None)), \
+                    patch(__name__ + ".Client", Driver), \
+                    patch(__name__ + ".run_round", side_effect=round_effect), \
+                    contextlib.redirect_stdout(capture):
+                try:
+                    main()
+                except expected_error:
+                    pass
+                else:
+                    raise AssertionError("injected main-path fault did not fail")
+            output = json.loads(capture.getvalue().splitlines()[-1])["report"]
+            saved = pathlib.Path(output)
+            injected = json.loads(saved.read_text())
+            injected.update(test_fault_injection=True, no_external_provider_calls=True)
+            saved.write_text(json.dumps(injected, indent=2) + "\n")
+            return injected
+
+        class WrongRegion:
+            calls = []
+            def get_bucket_location(self, **kwargs):
+                self.calls.append("GetBucketLocation")
+                return {"LocationConstraint": "eu-west-1"}
+        wrong = WrongRegion()
+        rejection = main_fault(wrong, "aws", ValueError)
+        assert wrong.calls == ["GetBucketLocation"]
+        assert not rejection["prefix_owned"] and not rejection["cleaned"] and not rejection["cases"]
+        assert rejection["error_type"] == "ValueError" and "cleanup_skipped" in rejection
+        checks.append("wrong AWS bucket region rejected before ownership, workload or cleanup mutation")
+
+        def leave_object(client, mode, workers, round_number, history, args, env, *rest):
+            s3.put_object(Bucket=bucket, Key=env["EXECUTION_PREFIX"] + "/tasks/injected", Body=b"retained")
+            return {"completed": 1, "failed": 0, "cancelled": 0,
+                    "pending_or_unobserved": 0, "submission_errors_indeterminate": []}
+        failed_report = main_fault(RejectDelete(), "rustfs", RuntimeError, leave_object)
+        assert failed_report["prefix_owned"] and not failed_report["cleaned"]
+        assert failed_report["cleanup_errors"] == [{"stage": "bucket", "type": "RuntimeError"}]
+        assert not failed_report["recording_completed"]
+        assert s3.list_objects_v2(Bucket=bucket, Prefix=failed_report["owned_run_prefix"] + "/")["Contents"]
+        checks.append("main report records injected cleanup failure as unclean with bucket-stage error")
+        return {"backend": "local RustFS", "passed": True, "checks": checks}
+    finally:
+        if created:
+            for page in s3.get_paginator("list_objects_v2").paginate(Bucket=bucket):
+                objects = [{"Key": obj["Key"]} for obj in page.get("Contents", [])]
+                if objects:
+                    assert not s3.delete_objects(Bucket=bucket, Delete={"Objects": objects}).get("Errors")
+            s3.delete_bucket(Bucket=bucket)
+            try:
+                s3.head_bucket(Bucket=bucket)
+            except ClientError as error:
+                assert error.response["ResponseMetadata"]["HTTPStatusCode"] == 404
+            else:
+                raise AssertionError("local contract fixture bucket remains")
+        s3.close()
 
 
 def percentiles(values):
@@ -225,7 +395,20 @@ def main():
     parser.add_argument("--inspect-interval", type=float, default=1)
     parser.add_argument("--language", choices=("mixed", "python", "typescript"), default="mixed")
     parser.add_argument("--workload", choices=("webhook", "import"), default="webhook")
+    parser.add_argument("--bucket", help="precreated empty target; preserve bucket and clean only this run prefix")
+    parser.add_argument("--check-bucket-contract", dest="self_test_bucket_contract",
+                        action="store_true", help="run local RustFS ownership/cleanup behavior tests")
     args = parser.parse_args()
+    if args.self_test_bucket_contract:
+        result = bucket_contract_tests()
+        output = ROOT.parent / "outputs/evidence/load-bucket-contract.json"
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(json.dumps(result, indent=2) + "\n")
+        print(json.dumps(result, indent=2))
+        return
+    if args.bucket and (not 3 <= len(args.bucket) <= 63 or not args.bucket.isascii()
+                        or any(char not in "abcdefghijklmnopqrstuvwxyz0123456789.-" for char in args.bucket)):
+        parser.error("--bucket requires a precreated S3 bucket name")
     if not 1 <= args.tasks <= 1000 or not 1 <= args.duration <= 300 or not .1 <= args.inspect_interval <= 10 or any(not 1 <= count <= 16 for count in args.workers):
         parser.error("tasks1-1000, duration1-300 seconds, inspect-interval0.1-10 seconds, workers1-16 required")
     server_binary = pathlib.Path(os.environ.get("ENGINE_BINARY", ROOT / "engine/target/release" / ("deoos-engine.exe" if os.name == "nt" else "deoos-engine")))
@@ -244,21 +427,30 @@ def main():
               "method": "Burst submission to actual webhook or two-page import handler; real CLI workers. Throughput counts completed top-level workflows and includes worker startup, admission and terminal observation. Nearest-rank latency covers only observed completed workflows, from before submission to first terminal inspection; unfinished latencies are censored. It includes polling/inspection lag; sequential scans can exceed the configured inspection interval. Peak backlog counts nonterminal top-level workflows observed during sequential scans; fast completions before the first scan can be missed. Counted transport adds proxy overhead, including fresh TLS connections for AWS, and measures diagnostic request counts rather than direct capacity. Counts include driver submit/inspect storage traffic, excluding untimed task inventory and cleanup. CPU/RSS sample driver (including fixture/proxy/native client), workers and shared server; excludes RustFS container. CPU uses ps cumulative-time deltas; no ps means unavailable. Retries cover observed terminal workflows only. No general production throughput claim."}
     s3, placement, region, credentials = storage(args.backend, args.transport)
     report["store"] = placement
-    bucket = "deoos-load-" + uuid.uuid4().hex[:20]
+    bucket = args.bucket or "deoos-load-" + uuid.uuid4().hex[:20]
     report["bucket"] = bucket
+    run_prefix = "load/" + uuid.uuid4().hex
+    report.update(external_bucket=bool(args.bucket), candidate_run_prefix=run_prefix, prefix_owned=False)
+    external = PrecreatedBucket(s3, bucket, run_prefix) if args.bucket else None
     created, fixture, proxy, client, server = False, None, None, None, None
     for key in list(os.environ):
         if key.startswith("DEOOS_STORAGE_"):
             os.environ.pop(key)
     os.environ.update(AWS_BUCKET=bucket, DEOOS_STORAGE_PROVIDER="s3")
     try:
-        create = {"Bucket": bucket}
-        if args.backend == "aws" and region != "us-east-1":
-            create["CreateBucketConfiguration"] = {"LocationConstraint": region}
-        created = True  # Cleanup owns this exact random name even after an ambiguous create response.
-        s3.create_bucket(**create)
-        if args.backend == "aws":
-            s3.put_public_access_block(Bucket=bucket, PublicAccessBlockConfiguration={key: True for key in ("BlockPublicAcls", "IgnorePublicAcls", "BlockPublicPolicy", "RestrictPublicBuckets")})
+        if external:
+            if args.backend == "aws":
+                report["verified_bucket_region"] = require_bucket_region(s3, bucket, region)
+            external.admit()
+            report.update(prefix_owned=True, owned_run_prefix=run_prefix)
+        else:
+            create = {"Bucket": bucket}
+            if args.backend == "aws" and region != "us-east-1":
+                create["CreateBucketConfiguration"] = {"LocationConstraint": region}
+            created = True  # Cleanup owns this exact random name even after an ambiguous create response.
+            s3.create_bucket(**create)
+            if args.backend == "aws":
+                s3.put_public_access_block(Bucket=bucket, PublicAccessBlockConfiguration={key: True for key in ("BlockPublicAcls", "IgnorePublicAcls", "BlockPublicPolicy", "RestrictPublicBuckets")})
         if args.transport == "counted":
             proxy = CountingProxy(args.backend, credentials, port=0)
             proxy.start()
@@ -273,7 +465,7 @@ def main():
             (work / "node_modules/deoos").symlink_to(ROOT / "clients/typescript", target_is_directory=True)
             for mode in args.mode or ["library", "server"]:
                 for workers in args.workers:
-                    prefix = "load/" + uuid.uuid4().hex
+                    prefix = run_prefix + "/" + uuid.uuid4().hex
                     os.environ.update(EXECUTION_PREFIX=prefix, DEOOS_MODE=mode)
                     env = dict(os.environ, PYTHONPATH=str(ROOT / "clients/python"), SERVICE_URL=fixture.url)
                     if mode == "server":
@@ -324,7 +516,9 @@ def main():
             except BaseException as error:
                 cleanup_errors.append({"stage": stage, "type": type(error).__name__})
         try:
-            if created:
+            if external:
+                report.update(external.cleanup())
+            elif created:
                 try:
                     s3.head_bucket(Bucket=bucket)
                 except ClientError as error:
@@ -353,7 +547,8 @@ def main():
         output.parent.mkdir(parents=True, exist_ok=True)
         output.write_text(json.dumps(report, indent=2) + "\n")
         print(json.dumps({"report": str(output), "cleaned": report["cleaned"]}), flush=True)
-        if cleanup_errors or not report["cleaned"]:
+        cleanup_required = created or (external is not None and external.owned)
+        if cleanup_errors or (cleanup_required and not report["cleaned"]):
             raise RuntimeError("load cleanup incomplete; inspect report")
 
 
