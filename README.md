@@ -13,13 +13,13 @@ Download and unpack the release for your platform. Python 3.10+ and Node 22+ are
 
 | Release target | Operating requirements | Runtime verification |
 | --- | --- | --- |
-| `macos-arm64` | macOS 11+; Apple Silicon | Both modes and SDKs on this Mac |
-| `macos-x64` | macOS 11+; Intel-compatible Python/Node | Both modes and SDKs through Rosetta |
-| `linux-arm64` | ARM64 Linux, glibc 2.28+ | Both modes and SDKs in ARM Linux |
-| `linux-x64` | x86_64 Linux, glibc 2.28+ | Both modes and SDKs in emulated x86_64 Linux |
-| `windows-x64` | x86_64 Windows | Package built; Windows runtime validation pending |
+| `macos-arm64` | macOS 11+; Apple Silicon | Both modes and SDKs on native ARM64 macOS CI |
+| `macos-x64` | macOS 11+; Intel-compatible Python/Node | Both modes and SDKs on native x86_64 macOS CI |
+| `linux-arm64` | ARM64 Linux, glibc 2.28+ | Both modes and SDKs on native ARM64 Linux CI |
+| `linux-x64` | x86_64 Linux, glibc 2.28+ | Both modes and SDKs on native x86_64 Linux CI |
+| `windows-x64` | x86_64 Windows | Both modes and SDKs on Windows Server 2022 CI |
 
-Linux releases use audited `manylinux_2_28` wheels; Alpine/musl is outside these builds. Choose a Python/Node distribution compatible with your operating system. Intel macOS and x86_64 Linux tests exercise the target binaries on an ARM host; they are not separate physical-machine tests.
+Linux releases use audited `manylinux_2_28` wheels; Alpine/musl is outside these builds. Choose a Python/Node distribution compatible with your operating system. All five targets passed fresh-package installation and cross-language recovery tests against real S3 on their native architectures. Linux tests run inside pinned manylinux containers. The macOS 11 deployment target and glibc 2.28 baseline are build requirements; CI does not test every supported OS version.
 
 ```sh
 python3 -m venv .venv
@@ -35,6 +35,8 @@ Releases contain an installable Python wheel, npm tarball, optional server execu
 ## Library mode
 
 Configure `AWS_BUCKET`, `AWS_REGION`, and AWS credentials in the environment. Temporary credentials need `AWS_SESSION_TOKEN` too. Explicit storage settings can also be passed to Client. Each execution worker uses the same bucket and prefix.
+
+AWS S3 and RustFS are the tested storage backends. RustFS is the recommended self-hosted target; distributed deployment and air-gapped operation still need separate qualification. Cloudflare R2, Google Cloud Storage and Azure Blob Storage are planned targets. Every supported backend must pass the same execution behavior tests.
 
 ```python
 from deoos import Client
@@ -256,4 +258,4 @@ Functions restart from the top on recovery; named steps return committed values.
 
 This alpha supports claims, leases, checkpoints, retries, recovery, child-task composition, timers, signals, cancellation, declared code/checkpoint compatibility and interval schedules/backfills. Task inspection, bounded history, manual retry, a small shared-server UI, paired complete application examples and measured discovery/request costs are included. No production HA, tenant isolation, garbage collection or application throughput guarantee is claimed.
 
-macOS Apple Silicon remains the primary development platform. The portability phase has verified both modes and SDKs for all four macOS/Linux targets above. Windows packaging is implemented; executing its candidate on a real Windows runtime remains the final platform proof.
+macOS Apple Silicon remains the primary development platform. Native CI has verified both modes and SDKs for all five targets above, including worker replacement, shared-server restart, persisted timer/signal waits and cross-language recovery.
