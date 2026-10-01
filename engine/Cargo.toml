@@ -1,0 +1,24 @@
+[package]
+name = "deoos-engine"
+version = "0.6.0"
+edition = "2024"
+
+[dependencies]
+axum = "0.8"
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["float_roundtrip"] }
+sha2 = "0.10"
+object_store = { version = "0.12", features = ["aws"] }
+bytes = "1"
+futures = "0.3"
+uuid = { version = "1", features = ["v4"] }
+
+[profile.release]
+opt-level = "s"
+lto = "thin"
+codegen-units = 1
+strip = true
+
+[lib]
+crate-type = ["rlib", "cdylib"]

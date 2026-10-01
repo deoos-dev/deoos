@@ -1,0 +1,126 @@
+services:
+  node1:
+    depends_on:
+      init1:
+        condition: service_completed_successfully
+    image: rustfs/rustfs@sha256:8cc9801755448b71a786705ce76692c77e14936cccd87cf2fc31842e58f4d1ff
+    environment:
+      RUSTFS_ACCESS_KEY: local-development
+      RUSTFS_SECRET_KEY: local-development-only-secret
+      RUSTFS_UNSAFE_BYPASS_DISK_CHECK: "true" # CI only: Docker volumes share host disks
+      RUSTFS_VOLUMES: "http://node{1...4}:9000/data{1...4}"
+    ports:
+      - "127.0.0.1:19101:9000"
+    volumes:
+      - node1-disk1:/data1
+      - node1-disk2:/data2
+      - node1-disk3:/data3
+      - node1-disk4:/data4
+  node2:
+    depends_on:
+      init2:
+        condition: service_completed_successfully
+    image: rustfs/rustfs@sha256:8cc9801755448b71a786705ce76692c77e14936cccd87cf2fc31842e58f4d1ff
+    environment:
+      RUSTFS_ACCESS_KEY: local-development
+      RUSTFS_SECRET_KEY: local-development-only-secret
+      RUSTFS_UNSAFE_BYPASS_DISK_CHECK: "true" # CI only: Docker volumes share host disks
+      RUSTFS_VOLUMES: "http://node{1...4}:9000/data{1...4}"
+    ports:
+      - "127.0.0.1:19102:9000"
+    volumes:
+      - node2-disk1:/data1
+      - node2-disk2:/data2
+      - node2-disk3:/data3
+      - node2-disk4:/data4
+  node3:
+    depends_on:
+      init3:
+        condition: service_completed_successfully
+    image: rustfs/rustfs@sha256:8cc9801755448b71a786705ce76692c77e14936cccd87cf2fc31842e58f4d1ff
+    environment:
+      RUSTFS_ACCESS_KEY: local-development
+      RUSTFS_SECRET_KEY: local-development-only-secret
+      RUSTFS_UNSAFE_BYPASS_DISK_CHECK: "true" # CI only: Docker volumes share host disks
+      RUSTFS_VOLUMES: "http://node{1...4}:9000/data{1...4}"
+    ports:
+      - "127.0.0.1:19103:9000"
+    volumes:
+      - node3-disk1:/data1
+      - node3-disk2:/data2
+      - node3-disk3:/data3
+      - node3-disk4:/data4
+  node4:
+    depends_on:
+      init4:
+        condition: service_completed_successfully
+    image: rustfs/rustfs@sha256:8cc9801755448b71a786705ce76692c77e14936cccd87cf2fc31842e58f4d1ff
+    environment:
+      RUSTFS_ACCESS_KEY: local-development
+      RUSTFS_SECRET_KEY: local-development-only-secret
+      RUSTFS_UNSAFE_BYPASS_DISK_CHECK: "true" # CI only: Docker volumes share host disks
+      RUSTFS_VOLUMES: "http://node{1...4}:9000/data{1...4}"
+    ports:
+      - "127.0.0.1:19104:9000"
+    volumes:
+      - node4-disk1:/data1
+      - node4-disk2:/data2
+      - node4-disk3:/data3
+      - node4-disk4:/data4
+  init1:
+    image: rustfs/rustfs@sha256:8cc9801755448b71a786705ce76692c77e14936cccd87cf2fc31842e58f4d1ff
+    user: "0:0"
+    entrypoint: ["/bin/sh", "-c"]
+    command: ["chown -R 10001:10001 /data1 /data2 /data3 /data4"]
+    volumes:
+      - node1-disk1:/data1
+      - node1-disk2:/data2
+      - node1-disk3:/data3
+      - node1-disk4:/data4
+  init2:
+    image: rustfs/rustfs@sha256:8cc9801755448b71a786705ce76692c77e14936cccd87cf2fc31842e58f4d1ff
+    user: "0:0"
+    entrypoint: ["/bin/sh", "-c"]
+    command: ["chown -R 10001:10001 /data1 /data2 /data3 /data4"]
+    volumes:
+      - node2-disk1:/data1
+      - node2-disk2:/data2
+      - node2-disk3:/data3
+      - node2-disk4:/data4
+  init3:
+    image: rustfs/rustfs@sha256:8cc9801755448b71a786705ce76692c77e14936cccd87cf2fc31842e58f4d1ff
+    user: "0:0"
+    entrypoint: ["/bin/sh", "-c"]
+    command: ["chown -R 10001:10001 /data1 /data2 /data3 /data4"]
+    volumes:
+      - node3-disk1:/data1
+      - node3-disk2:/data2
+      - node3-disk3:/data3
+      - node3-disk4:/data4
+  init4:
+    image: rustfs/rustfs@sha256:8cc9801755448b71a786705ce76692c77e14936cccd87cf2fc31842e58f4d1ff
+    user: "0:0"
+    entrypoint: ["/bin/sh", "-c"]
+    command: ["chown -R 10001:10001 /data1 /data2 /data3 /data4"]
+    volumes:
+      - node4-disk1:/data1
+      - node4-disk2:/data2
+      - node4-disk3:/data3
+      - node4-disk4:/data4
+volumes:
+  node1-disk1:
+  node1-disk2:
+  node1-disk3:
+  node1-disk4:
+  node2-disk1:
+  node2-disk2:
+  node2-disk3:
+  node2-disk4:
+  node3-disk1:
+  node3-disk2:
+  node3-disk3:
+  node3-disk4:
+  node4-disk1:
+  node4-disk2:
+  node4-disk3:
+  node4-disk4:

@@ -1,0 +1,11 @@
+[package]
+name = "deoos-node"
+version = "0.6.0"
+edition = "2024"
+[lib]
+crate-type = ["cdylib"]
+[dependencies]
+deoos-engine = { path = "../../engine" }
+napi = { version = "3", features = ["tokio_rt", "napi8"] }
+napi-derive = "3"
+serde_json = "1"

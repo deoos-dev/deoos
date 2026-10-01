@@ -1,0 +1,18 @@
+{
+  "name": "deoos",
+  "version": "0.6.0",
+  "type": "module",
+  "exports": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": ["dist"],
+  "engines": {"node": ">=22"},
+  "scripts": {
+    "build": "tsc",
+    "prepack": "node -e \"const fs=require('node:fs'); for (const p of ['dist/index.js','dist/index.d.ts','dist/native/deoos_node.node']) if (!fs.existsSync(p)) { console.error('Missing built package file: '+p); process.exit(1) }\""
+  },
+  "devDependencies": {
+    "typescript": "^5.9.0",
+    "@types/node": "^22.0.0"
+  },
+  "description": "DEOOS \u2014 Durable Execution on Object Storage"
+}

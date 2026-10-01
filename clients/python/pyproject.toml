@@ -1,0 +1,10 @@
+[build-system]
+requires = ["setuptools>=68", "wheel>=0.43"]
+build-backend = "setuptools.build_meta"
+[project]
+name = "deoos"
+version = "0.6.0"
+description = "DEOOS — Durable Execution on Object Storage"
+requires-python = ">=3.10"
+[tool.setuptools.package-data]
+deoos = ["native/*.dylib", "native/*.so", "native/*.dll"]

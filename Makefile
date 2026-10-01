@@ -1,0 +1,32 @@
+PYTHON ?= python3
+TEST_PYTHON ?= tests/.venv/bin/python
+.PHONY: build setup test-local test-aws test-cluster package test-package clean-local
+
+build:
+	$(PYTHON) packaging/build_package.py --build-only
+
+setup: build
+	$(PYTHON) -m venv tests/.venv
+	tests/.venv/bin/pip install -r tests/requirements.txt
+
+test-local: build
+	docker compose up -d
+	ENGINE_BINARY="$(CURDIR)/engine/target/release/deoos-engine" $(TEST_PYTHON) tests/two_modes.py rustfs
+
+test-aws: build
+	ENGINE_BINARY="$(CURDIR)/engine/target/release/deoos-engine" $(TEST_PYTHON) tests/two_modes.py aws
+
+test-cluster: build
+	docker compose -p durable-cluster -f compose.cluster.yaml up -d
+	$(TEST_PYTHON) tests/cluster_contract.py
+
+package: build
+	$(PYTHON) packaging/build_package.py --package-only
+
+test-package:
+	docker compose up -d
+	$(TEST_PYTHON) tests/package_smoke.py
+
+clean-local:
+	docker compose down -v
+	docker compose -p durable-cluster -f compose.cluster.yaml down -v

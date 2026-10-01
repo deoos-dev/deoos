@@ -1,0 +1,17 @@
+engine/target/
+node_modules/
+__pycache__/
+.env
+.venv*/
+clients/typescript/dist/
+clients/python/build/
+clients/python/dist/
+*.egg-info/
+bindings/node/target/
+clients/python/deoos/native/*.dylib
+clients/python/deoos/native/*.so
+clients/python/deoos/native/*.dll
+*.whl
+*.tgz
+
+.DS_Store
