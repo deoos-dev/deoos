@@ -1,6 +1,6 @@
 PYTHON ?= python3
 TEST_PYTHON ?= tests/.venv/bin/python
-.PHONY: build setup test-local test-aws test-cluster package test-package clean-local
+.PHONY: build setup test-local test-aws test-cluster test-examples package test-package clean-local
 
 build:
 	$(PYTHON) packaging/build_package.py --build-only
@@ -15,6 +15,10 @@ test-local: build
 
 test-aws: build
 	ENGINE_BINARY="$(CURDIR)/engine/target/release/deoos-engine" $(TEST_PYTHON) tests/two_modes.py aws
+
+test-examples: build
+	docker compose up -d
+	ENGINE_BINARY="$(CURDIR)/engine/target/release/deoos-engine" $(TEST_PYTHON) tests/use_cases.py
 
 test-cluster: build
 	docker compose -p durable-cluster -f compose.cluster.yaml up -d

@@ -99,9 +99,23 @@ async fn main() {
             println!("deoos-engine {}", env!("CARGO_PKG_VERSION"));
             return;
         }
+        Some("--check-storage") => {
+            let result = match Engine::from_env() {
+                Ok(engine) => engine.check_storage().await,
+                Err(error) => Err(error),
+            };
+            match result {
+                Ok(report) => println!("{}", serde_json::to_string_pretty(&report).unwrap()),
+                Err(error) => {
+                    eprintln!("storage qualification failed: {error}");
+                    std::process::exit(1);
+                }
+            }
+            return;
+        }
         Some("--help") | Some("-h") => {
             println!(
-                "deoos-engine: S3-backed execution service\n\nConfiguration via environment:\n  AWS_BUCKET (required), AWS_REGION, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY\n  AWS_SESSION_TOKEN for temporary credentials\n  AWS_ENDPOINT and AWS_ALLOW_HTTP=true for local S3-compatible storage\n  EXECUTION_PREFIX (default durable-v3)\n  ENGINE_BIND (default 127.0.0.1:7331)\n  ENGINE_TOKEN required for non-loopback shared-server access\n  LEASE_MS (default 30000)\n\nUse the Python or TypeScript SDK to submit and execute tasks."
+                "deoos-engine: object-storage-backed execution service\n\nConfiguration via environment:\n  DEOOS_STORAGE_PROVIDER: s3 (default), gcs or azure\n  DEOOS_STORAGE_BUCKET: bucket/container; AWS_BUCKET remains an S3 fallback\n  GOOGLE_* or AZURE_* native credentials for their providers\n  AWS_REGION, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY for S3\n  AWS_SESSION_TOKEN for temporary credentials\n  AWS_ENDPOINT and AWS_ALLOW_HTTP=true for local S3-compatible storage\n  EXECUTION_PREFIX (default durable-v3)\n  ENGINE_BIND (default 127.0.0.1:7331)\n  ENGINE_TOKEN required for non-loopback shared-server access\n  LEASE_MS (default 30000)\n\nUse the Python or TypeScript SDK to submit and execute tasks.\n--check-storage tests conditional writes and read/list consistency in an isolated temporary namespace."
             );
             return;
         }
@@ -111,7 +125,7 @@ async fn main() {
         }
         None => {}
     }
-    let e = Engine::from_env().expect("S3 configuration");
+    let e = Engine::from_env().expect("storage configuration");
     let app = Router::new()
         .route("/health", get(|| async { "ok" }))
         .route("/", get(ui))

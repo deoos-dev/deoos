@@ -82,6 +82,7 @@ jobs:
               raise RuntimeError('RustFS did not become ready')
           PYTHON
           python tests/two_modes.py rustfs
+          python tests/use_cases.py
       - name: Capture RustFS logs and remove its volume
         if: always()
         run: |

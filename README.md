@@ -38,6 +38,12 @@ Configure `AWS_BUCKET`, `AWS_REGION`, and AWS credentials in the environment. Te
 
 AWS S3 and RustFS are the tested storage backends. RustFS is the recommended self-hosted target; distributed deployment and air-gapped operation still need separate qualification. Cloudflare R2, Google Cloud Storage and Azure Blob Storage are planned targets. Every supported backend must pass the same execution behavior tests.
 
+The native adapters select `s3` (default), `gcs` or `azure` through `DEOOS_STORAGE_PROVIDER` or the embedded client's `provider` option. `DEOOS_STORAGE_BUCKET` names the bucket or Azure container; `AWS_BUCKET` remains an S3 fallback. GCS and Azure construction is implemented, but real-service execution remains unverified. GCS uses native `GOOGLE_*` credentials; Azure uses native `AZURE_*` credentials. S3-specific credential/region options are rejected when selecting another provider. R2 uses the S3 adapter with its account API endpoint and region `auto`; it is not yet qualified.
+
+`deoos-server --check-storage` uses the configured store and creates one UUID-isolated object under `<prefix>/qualification/`. It races 32 creates and 32 conditional replacements, checks stale-writer rejection and immediate read/list visibility, then deletes the object. Failure exits nonzero, including unexpected throttling. This checks storage primitives only; qualification also requires the full SDK workflow and recovery suite in both deployment modes. Use a dedicated test bucket/container with no retention or versioning policy; the probe removes the live object, not historical versions retained by the provider. It never creates or deletes a bucket/container.
+
+The [use-case library](examples/README.md) provides paired Python/TypeScript examples for reliable webhook delivery, invoice approval and scheduled ingestion. Run workers near their cloud object store or beside self-hosted RustFS. The examples use a local simulated HTTP adapter; its test results establish execution behavior, not integration with an external vendor.
+
 ```python
 from deoos import Client
 

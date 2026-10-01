@@ -53,6 +53,7 @@ class CountingProxy:
                 with owner.lock:
                     owner.inflight += 1
                 status, size = 599, 0
+                error_type, error_errno, reply_error_type = None, None, None
                 conn = None
                 try:
                     headers = dict(self.headers)
@@ -79,15 +80,25 @@ class CountingProxy:
                     self.send_header("Content-Length", str(size))
                     self.end_headers()
                     self.wfile.write(payload)
-                except (BrokenPipeError, ConnectionResetError):
-                    pass
-                except Exception:
-                    self.send_error(502, "S3 forwarding failed")
+                except (BrokenPipeError, ConnectionResetError) as error:
+                    error_type, error_errno = type(error).__name__, getattr(error, "errno", None)
+                except Exception as error:
+                    error_type, error_errno = type(error).__name__, getattr(error, "errno", None)
+                    try:
+                        self.send_error(502, "S3 forwarding failed")
+                    except Exception as reply_error:
+                        reply_error_type = type(reply_error).__name__
                 finally:
                     if conn is not None:
-                        conn.close()
+                        try:
+                            conn.close()
+                        except Exception as error:
+                            if error_type is None:
+                                error_type, error_errno = type(error).__name__, getattr(error, "errno", None)
                     with owner.lock:
-                        owner.rows.append({"operation": operation, "status": status, "elapsed_ms": (time.perf_counter() - started) * 1000, "request_bytes": len(body), "response_bytes": size})
+                        owner.rows.append({"operation": operation, "status": status, "elapsed_ms": (time.perf_counter() - started) * 1000, "request_bytes": len(body), "response_bytes": size,
+                                           "error_type": error_type, "errno": error_errno if isinstance(error_errno, int) else None,
+                                           "reply_error_type": reply_error_type})
                         owner.inflight -= 1
 
             do_GET = do_PUT = do_HEAD = do_DELETE = do_POST = forward
@@ -108,7 +119,10 @@ class CountingProxy:
         with self.lock:
             rows = list(self.rows)
         durations = [row["elapsed_ms"] for row in rows]
-        return {"requests": dict(collections.Counter(row["operation"] for row in rows)), "statuses": dict(collections.Counter(str(row["status"]) for row in rows)), "request_bytes": sum(row["request_bytes"] for row in rows), "response_bytes": sum(row["response_bytes"] for row in rows), "s3_request_median_ms": statistics.median(durations) if durations else None, "s3_request_max_ms": max(durations) if durations else None}
+        return {"requests": dict(collections.Counter(row["operation"] for row in rows)), "statuses": dict(collections.Counter(str(row["status"]) for row in rows)), "request_bytes": sum(row["request_bytes"] for row in rows), "response_bytes": sum(row["response_bytes"] for row in rows), "s3_request_median_ms": statistics.median(durations) if durations else None, "s3_request_max_ms": max(durations) if durations else None,
+                "error_types": dict(collections.Counter(row["error_type"] for row in rows if row.get("error_type"))),
+                "errnos": dict(collections.Counter(str(row["errno"]) for row in rows if row.get("errno") is not None)),
+                "reply_error_types": dict(collections.Counter(row["reply_error_type"] for row in rows if row.get("reply_error_type")))}
 
     def drain(self):
         end = time.monotonic() + 35

@@ -6,7 +6,8 @@ use axum::{
 use bytes::Bytes;
 use futures::TryStreamExt;
 use object_store::{
-    ObjectStore, PutMode, PutOptions, UpdateVersion, aws::AmazonS3Builder, path::Path as Key,
+    ObjectStore, PutMode, PutOptions, UpdateVersion, aws::AmazonS3Builder,
+    azure::MicrosoftAzureBuilder, gcp::GoogleCloudStorageBuilder, path::Path as Key,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -18,6 +19,7 @@ use std::{
 };
 use uuid::Uuid;
 const PROTOCOL_VERSION: u32 = 3;
+mod qualification;
 
 #[derive(Clone)]
 pub struct Engine {
@@ -211,7 +213,7 @@ fn storage(err: object_store::Error) -> (StatusCode, String) {
             conflict("conditional write conflict")
         }
         _ => {
-            eprintln!("storage: {err}");
+            eprintln!("storage: {}", qualification::error_kind(&err));
             (
                 StatusCode::SERVICE_UNAVAILABLE,
                 "storage unavailable".into(),
@@ -220,6 +222,11 @@ fn storage(err: object_store::Error) -> (StatusCode, String) {
     }
 }
 impl Engine {
+    /// Check the storage primitives used by the execution protocol in an isolated namespace.
+    pub async fn check_storage(&self) -> Result<Value, String> {
+        qualification::check(self.store.as_ref(), &self.prefix).await
+    }
+
     fn key(&self, id: &str) -> Key {
         Key::from(format!("{}/tasks/{id}/state.json", self.prefix))
     }
@@ -900,6 +907,7 @@ async fn result(
 
 #[derive(Deserialize)]
 pub struct Config {
+    pub provider: Option<String>,
     pub bucket: String,
     pub prefix: Option<String>,
     pub region: Option<String>,
@@ -912,25 +920,70 @@ pub struct Config {
 }
 impl Engine {
     pub fn from_config(c: Config) -> Result<Self, String> {
-        let mut builder = AmazonS3Builder::from_env().with_bucket_name(c.bucket);
-        if let Some(v) = c.region {
-            builder = builder.with_region(v);
-        }
-        if let Some(v) = c.endpoint {
-            builder = builder.with_endpoint(v);
-        }
-        if let Some(v) = c.access_key_id {
-            builder = builder.with_access_key_id(v);
-        }
-        if let Some(v) = c.secret_access_key {
-            builder = builder.with_secret_access_key(v);
-        }
-        if let Some(v) = c.session_token {
-            builder = builder.with_token(v);
-        }
-        if let Some(v) = c.allow_http {
-            builder = builder.with_allow_http(v);
-        }
+        let provider = c
+            .provider
+            .or_else(|| std::env::var("DEOOS_STORAGE_PROVIDER").ok())
+            .unwrap_or_else(|| "s3".into());
+        let store: Arc<dyn ObjectStore> = match provider.as_str() {
+            "s3" => {
+                let mut builder = AmazonS3Builder::from_env().with_bucket_name(c.bucket);
+                if let Some(v) = c.region {
+                    builder = builder.with_region(v);
+                }
+                if let Some(v) = c.endpoint {
+                    builder = builder.with_endpoint(v);
+                }
+                if let Some(v) = c.access_key_id {
+                    builder = builder.with_access_key_id(v);
+                }
+                if let Some(v) = c.secret_access_key {
+                    builder = builder.with_secret_access_key(v);
+                }
+                if let Some(v) = c.session_token {
+                    builder = builder.with_token(v);
+                }
+                if let Some(v) = c.allow_http {
+                    builder = builder.with_allow_http(v);
+                }
+                Arc::new(builder.build().map_err(
+                    |_| "invalid S3 configuration; check bucket, region, endpoint and credentials",
+                )?)
+            }
+            "gcs" | "azure" => {
+                if c.region.is_some()
+                    || c.access_key_id.is_some()
+                    || c.secret_access_key.is_some()
+                    || c.session_token.is_some()
+                {
+                    return Err("S3 credential/region options require provider=s3; use native provider credentials".into());
+                }
+                if provider == "gcs" {
+                    if c.endpoint.is_some() || c.allow_http.is_some() {
+                        return Err(
+                            "GCS endpoint/transport options must use native provider configuration"
+                                .into(),
+                        );
+                    }
+                    Arc::new(
+                        GoogleCloudStorageBuilder::from_env()
+                            .with_bucket_name(c.bucket)
+                            .build()
+                            .map_err(|_| "invalid GCS configuration; check bucket and native provider credentials")?,
+                    )
+                } else {
+                    let mut builder =
+                        MicrosoftAzureBuilder::from_env().with_container_name(c.bucket);
+                    if let Some(v) = c.endpoint {
+                        builder = builder.with_endpoint(v);
+                    }
+                    if let Some(v) = c.allow_http {
+                        builder = builder.with_allow_http(v);
+                    }
+                    Arc::new(builder.build().map_err(|_| "invalid Azure configuration; check account, container, endpoint and native provider credentials")?)
+                }
+            }
+            _ => return Err("provider must be s3, gcs or azure".into()),
+        };
         let lease_ms = c.lease_ms.unwrap_or(30000);
         if lease_ms < 1000 {
             return Err("lease_ms must be >= 1000".into());
@@ -948,14 +1001,25 @@ impl Engine {
             );
         }
         Ok(Self {
-            store: Arc::new(builder.build().map_err(|e| e.to_string())?),
+            store,
             prefix,
             lease_ms,
         })
     }
     pub fn from_env() -> Result<Self, String> {
+        let provider = std::env::var("DEOOS_STORAGE_PROVIDER").unwrap_or_else(|_| "s3".into());
+        let bucket = std::env::var("DEOOS_STORAGE_BUCKET")
+            .or_else(|error| {
+                if provider == "s3" {
+                    std::env::var("AWS_BUCKET")
+                } else {
+                    Err(error)
+                }
+            })
+            .map_err(|_| "DEOOS_STORAGE_BUCKET (or AWS_BUCKET for S3) required")?;
         Self::from_config(Config {
-            bucket: std::env::var("AWS_BUCKET").map_err(|_| "AWS_BUCKET required")?,
+            provider: Some(provider),
+            bucket,
             prefix: std::env::var("EXECUTION_PREFIX").ok(),
             region: None,
             endpoint: None,

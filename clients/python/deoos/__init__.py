@@ -43,7 +43,9 @@ class Client:
         if self.url is None:
             from .native import NativeEngine
             import os
-            config["bucket"] = bucket or os.environ.get("AWS_BUCKET")
+            provider = config.get("provider") or os.environ.get("DEOOS_STORAGE_PROVIDER", "s3")
+            config["bucket"] = bucket or os.environ.get("DEOOS_STORAGE_BUCKET") or (
+                os.environ.get("AWS_BUCKET") if provider == "s3" else None)
             if not config["bucket"]:
                 raise ValueError("bucket is required for library mode")
             config["prefix"] = prefix or os.environ.get("EXECUTION_PREFIX", "durable-v3")
