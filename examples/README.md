@@ -8,6 +8,8 @@ These examples use the same workflows in embedded and shared-server modes, with 
 | Invoice approval | Persist a wait, stop the worker, then approve or decline | Approval signal followed by an idempotent accounting API call |
 | Scheduled ingestion | Fetch pages as child tasks, join them, publish a batch | Source API and idempotent batch destination |
 
+Pattern references: [idempotent API requests](https://docs.stripe.com/api/idempotent_requests), [signal-based approvals](https://github.com/temporalio/documentation/blob/main/docs/design-patterns/approval.mdx), and [scheduled flows](https://docs.prefect.io/v3/how-to-guides/deployments/create-schedules). The runnable examples use the simulated HTTP adapter described below.
+
 The paired programs are `use_cases.py` and `use_cases.mjs`. They use only the DEOOS SDK and language standard libraries. Install the SDK for your platform before running them; keep the JavaScript example inside the Node project where you installed `deoos`.
 
 ## Deployment
@@ -45,6 +47,17 @@ Replace `python examples/use_cases.py` with `node examples/use_cases.mjs` for Ty
 
 `make test-examples TEST_PYTHON=tests/.venv312/bin/python` builds the native engine and runs the behavioral suite against local RustFS. The suite checks both languages and deployment modes, transient retries, approval and decline, persisted waits, scheduled ingestion and worker replacement across languages. Reports stay in `../outputs/evidence`, outside the repository. Real-provider and cloud-local performance results are reported separately from local fixture results. A cloud-local deployment is not established by a laptop-to-cloud run.
 
+The same suite accepts a precreated, dedicated cloud test bucket or container:
+
+```sh
+python tests/use_cases.py --backend s3 --bucket TEST_BUCKET
+python tests/use_cases.py --backend r2 --bucket TEST_BUCKET
+python tests/use_cases.py --backend gcs --bucket TEST_BUCKET
+python tests/use_cases.py --backend azure --bucket TEST_CONTAINER
+```
+
+It uses a generated prefix, removes only its own live objects, and preserves the supplied bucket/container. Historical versions and soft-deleted objects follow the provider's retention policy. S3/R2 use explicit environment credentials; R2 also needs its S3 API endpoint. GCS uses `GOOGLE_SERVICE_ACCOUNT_PATH`; Azure uses `AZURE_STORAGE_ACCOUNT_NAME` and exactly one of `AZURE_STORAGE_ACCOUNT_KEY` or `AZURE_STORAGE_SAS_KEY`. Cleanup uses optional test-only packages `google-cloud-storage` or `azure-storage-blob` for those providers; the DEOOS SDKs keep their existing dependencies. A configured adapter is qualified only after the primitive probe and all workflow checks pass on the actual service.
+
 For repeatable local load measurements after building, keep RustFS running and run:
 
 ```sh
@@ -54,4 +67,4 @@ tests/.venv312/bin/python tests/load.py --workload import --tasks 100 --workers 
 
 Each command runs both modes and compares a fresh namespace with one retaining the first burst's completed tasks. Reports include completed workflows per second, observed latency, backlog, retries and sampled process CPU/RSS. Latency includes submission and inspection lag; resource samples exclude the RustFS container. Use `--transport counted` to record storage requests and conditional conflicts through a local forwarding proxy; its overhead and failures must be considered separately from direct measurements. A finished report can contain failed or pending workflows, so inspect the outcomes and cleanup status.
 
-`--backend aws` requires a verified EC2 host in the same region as S3 and `DEOOS_EXPECTED_AWS_ACCOUNT`. It creates and removes a temporary test bucket, but does not provision compute infrastructure.
+`--backend aws` requires a verified EC2 host in the same region as S3 and `DEOOS_EXPECTED_AWS_ACCOUNT`. Counted AWS transport additionally requires an assumed role and `us-east-1`; it forwards through HTTPS and includes proxy/TLS overhead. It creates and removes a temporary test bucket, but does not provision compute infrastructure.

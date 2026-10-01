@@ -24,6 +24,7 @@ import urllib.request
 import uuid
 
 import boto3
+from botocore.config import Config
 from botocore.exceptions import ClientError
 from discovery_probe import CountingProxy
 from use_cases import IntegrationFixture, stop, wait
@@ -65,9 +66,7 @@ def storage(backend, transport):
         os.environ.pop("AWS_PROFILE", None)
         return boto3.client("s3", endpoint_url=os.environ["AWS_ENDPOINT"], region_name="us-east-1"), {
             "placement": "local loopback endpoint; expected existing RustFS container published port",
-            "endpoint": os.environ["AWS_ENDPOINT"], "cloud_local": False}, "us-east-1"
-    if transport != "direct":
-        raise ValueError("AWS load requires direct transport; counting proxy is local RustFS only")
+            "endpoint": os.environ["AWS_ENDPOINT"], "cloud_local": False}, "us-east-1", None
     expected = os.environ.get("DEOOS_EXPECTED_AWS_ACCOUNT")
     if not expected or not expected.isascii() or len(expected) != 12 or not expected.isdigit():
         raise ValueError("DEOOS_EXPECTED_AWS_ACCOUNT must contain 12 ASCII digits for AWS")
@@ -85,10 +84,16 @@ def storage(backend, transport):
         raise ValueError("EC2 identity must name the expected account and an instance region")
     if os.environ.get("AWS_REGION", region) != region:
         raise ValueError("AWS_REGION must match the verified EC2 region")
+    if transport == "counted" and region != "us-east-1":
+        raise ValueError("counted AWS forwarding currently supports verified us-east-1 only")
     session = boto3.Session(profile_name=os.environ.get("AWS_PROFILE"), region_name=region)
-    if session.client("sts").get_caller_identity()["Account"] != expected:
-        raise ValueError("AWS credential account does not match DEOOS_EXPECTED_AWS_ACCOUNT")
     suffix = "amazonaws.com.cn" if region.startswith("cn-") else "amazonaws.com"
+    caller = session.client("sts", endpoint_url=f"https://sts.{region}.{suffix}",
+                            config=Config(ignore_configured_endpoint_urls=True)).get_caller_identity()
+    if caller["Account"] != expected:
+        raise ValueError("AWS credential account does not match DEOOS_EXPECTED_AWS_ACCOUNT")
+    if transport == "counted" and ":assumed-role/" not in caller.get("Arn", ""):
+        raise ValueError("counted AWS forwarding requires assumed-role credentials")
     s3 = session.client("s3", endpoint_url=f"https://s3.{region}.{suffix}")
     credentials = session.get_credentials().get_frozen_credentials()
     os.environ.update(AWS_ACCESS_KEY_ID=credentials.access_key, AWS_SECRET_ACCESS_KEY=credentials.secret_key,
@@ -97,9 +102,9 @@ def storage(backend, transport):
         os.environ["AWS_SESSION_TOKEN"] = credentials.token
     else:
         os.environ.pop("AWS_SESSION_TOKEN", None)
-    return s3, {"placement": "verified EC2 worker host and direct S3 endpoint in the same region",
+    return s3, {"placement": "verified EC2 worker host and same-region S3 endpoint",
                 "region": region, "instance_id": identity["instanceId"],
-                "endpoint": s3.meta.endpoint_url, "cloud_local": True}, region
+                "endpoint": s3.meta.endpoint_url, "cloud_local": True}, region, credentials
 
 
 def run_round(client, mode, worker_count, round_number, history, args, env, work, fixture, proxy, server):
@@ -236,8 +241,8 @@ def main():
               "arguments": vars(args), "sha256": {str(path.relative_to(ROOT)) if path.is_relative_to(ROOT) else str(path): hashlib.sha256(path.read_bytes()).hexdigest() for path in files},
               "cases": [], "cleaned": False,
               "counted_status_599_meaning": "Proxy sentinel: no complete backend HTTP response recorded.",
-              "method": "Burst submission to actual webhook or two-page import handler; real CLI workers. Throughput counts completed top-level workflows and includes startup, admission and terminal observation. Nearest-rank latency starts before submission and ends at first terminal inspection, so includes polling/inspection lag; sequential scans can exceed the configured inspection interval. Peak backlog counts nonterminal top-level workflows observed during sequential scans; fast completions before the first scan can be missed. Counted transport adds proxy overhead and includes driver submit/inspect storage traffic, excluding untimed task inventory and cleanup. CPU/RSS sample driver (including fixture/proxy/native client), workers and shared server; excludes RustFS container. CPU uses ps cumulative-time deltas; no ps means unavailable. Retries cover observed terminal workflows only. No general production throughput claim."}
-    s3, placement, region = storage(args.backend, args.transport)
+              "method": "Burst submission to actual webhook or two-page import handler; real CLI workers. Throughput counts completed top-level workflows and includes worker startup, admission and terminal observation. Nearest-rank latency covers only observed completed workflows, from before submission to first terminal inspection; unfinished latencies are censored. It includes polling/inspection lag; sequential scans can exceed the configured inspection interval. Peak backlog counts nonterminal top-level workflows observed during sequential scans; fast completions before the first scan can be missed. Counted transport adds proxy overhead, including fresh TLS connections for AWS, and measures diagnostic request counts rather than direct capacity. Counts include driver submit/inspect storage traffic, excluding untimed task inventory and cleanup. CPU/RSS sample driver (including fixture/proxy/native client), workers and shared server; excludes RustFS container. CPU uses ps cumulative-time deltas; no ps means unavailable. Retries cover observed terminal workflows only. No general production throughput claim."}
+    s3, placement, region, credentials = storage(args.backend, args.transport)
     report["store"] = placement
     bucket = "deoos-load-" + uuid.uuid4().hex[:20]
     report["bucket"] = bucket
@@ -255,9 +260,10 @@ def main():
         if args.backend == "aws":
             s3.put_public_access_block(Bucket=bucket, PublicAccessBlockConfiguration={key: True for key in ("BlockPublicAcls", "IgnorePublicAcls", "BlockPublicPolicy", "RestrictPublicBuckets")})
         if args.transport == "counted":
-            proxy = CountingProxy("rustfs", port=0)
+            proxy = CountingProxy(args.backend, credentials, port=0)
             proxy.start()
             os.environ["AWS_ENDPOINT"] = f"http://127.0.0.1:{proxy.server.server_port}"
+            os.environ["AWS_ALLOW_HTTP"] = "true"  # HTTP is confined to this loopback proxy.
         fixture = IntegrationFixture()
         with tempfile.TemporaryDirectory(prefix="deoos-load-") as directory:
             work = pathlib.Path(directory)

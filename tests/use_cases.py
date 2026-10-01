@@ -1,7 +1,19 @@
-"""Behavioral acceptance for the example library, using local RustFS and HTTP fixtures.
+"""Behavioral acceptance for the example library, using storage and HTTP fixtures.
 
 Run with Python 3.12, after building both native SDKs and the shared server:
     tests/.venv312/bin/python tests/use_cases.py
+
+External targets must already exist and are never created or deleted:
+    python tests/use_cases.py --backend s3 --bucket DEDICATED_TEST_BUCKET
+    python tests/use_cases.py --backend r2 --bucket DEDICATED_TEST_BUCKET
+    python tests/use_cases.py --backend gcs --bucket DEDICATED_TEST_BUCKET
+    python tests/use_cases.py --backend azure --bucket DEDICATED_TEST_CONTAINER
+
+Test-only cleanup dependencies are loaded only for the selected provider: boto3
+for S3/R2, google-cloud-storage for GCS, azure-storage-blob for Azure. Supply
+explicit AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY (optional AWS_SESSION_TOKEN),
+GOOGLE_SERVICE_ACCOUNT_PATH, or AZURE_STORAGE_ACCOUNT_NAME plus exactly one of
+AZURE_STORAGE_ACCOUNT_KEY / AZURE_STORAGE_SAS_KEY. R2 also requires AWS_ENDPOINT.
 
 The HTTP service simulates integrations with an in-memory idempotency ledger that
 survives worker replacement. This proves example behavior, not provider support.
@@ -23,12 +35,179 @@ import tempfile
 import threading
 import time
 import urllib.request
+import urllib.parse
 import uuid
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 REPORT = ROOT.parent / "outputs/evidence/use-cases-rustfs.json"
 SERVER = pathlib.Path(os.environ.get(
     "ENGINE_BINARY", str(ROOT / "engine/target/release/deoos-engine"))).resolve()
+
+
+def storage_environment(backend, bucket):
+    """Freeze one explicit identity for both native workers and cleanup SDKs."""
+    source = dict(os.environ)
+    if backend == "rustfs":
+        if bucket is not None:
+            raise ValueError("RustFS uses a generated local bucket")
+        bucket = "deoos-use-cases-" + uuid.uuid4().hex[:20]
+    elif (not isinstance(bucket, str) or not 3 <= len(bucket) <= 222 or not bucket.isascii()
+          or any(not (char.isalnum() or char in "_.-") for char in bucket)):
+        raise ValueError("external targets require a precreated bucket/container name")
+    env = {key: value for key, value in source.items()
+           if not key.startswith(("AWS_", "GOOGLE_", "AZURE_", "DEOOS_STORAGE_"))
+           and key not in {"SERVICE_ACCOUNT", "ENGINE_BIND", "ENGINE_URL", "ENGINE_TOKEN",
+                           "DEOOS_NATIVE_LIBRARY", "DEOOS_NODE_LIBRARY"}}
+    env.update(DEOOS_STORAGE_PROVIDER="s3" if backend in ("rustfs", "s3", "r2") else backend,
+               DEOOS_STORAGE_BUCKET=bucket, EXECUTION_PREFIX="use-cases-" + uuid.uuid4().hex,
+               LEASE_MS="1500")
+    if backend == "rustfs":
+        env.update(AWS_ACCESS_KEY_ID="local-development", AWS_SECRET_ACCESS_KEY="local-development-only-secret",
+                   AWS_REGION="us-east-1", AWS_ENDPOINT="http://127.0.0.1:19000", AWS_ALLOW_HTTP="true")
+    elif backend in ("s3", "r2"):
+        for key in ("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"):
+            if not source.get(key):
+                raise ValueError("S3/R2 require explicit environment credentials")
+            env[key] = source[key]
+        for key in ("AWS_SESSION_TOKEN", "AWS_ALLOW_HTTP"):
+            if source.get(key):
+                env[key] = source[key]
+        endpoint = source.get("AWS_ENDPOINT")
+        alternate = source.get("AWS_ENDPOINT_URL_S3") or source.get("AWS_ENDPOINT_URL")
+        if alternate and (not endpoint or endpoint.rstrip("/") != alternate.rstrip("/")):
+            raise ValueError("cleanup and native S3 endpoint settings conflict; use AWS_ENDPOINT")
+        if endpoint:
+            env["AWS_ENDPOINT"] = endpoint
+        env["AWS_REGION"] = source.get("AWS_REGION", "auto" if backend == "r2" else "us-east-1")
+        if backend == "r2" and not env.get("AWS_ENDPOINT"):
+            raise ValueError("R2 requires an explicit AWS_ENDPOINT")
+    elif backend == "gcs":
+        path = source.get("GOOGLE_SERVICE_ACCOUNT_PATH")
+        if not path:
+            raise ValueError("GCS requires GOOGLE_SERVICE_ACCOUNT_PATH")
+        path = pathlib.Path(path).resolve()
+        account = json.loads(path.read_text())
+        if (account.get("type") != "service_account" or not account.get("project_id")
+                or account.get("gcs_base_url") or account.get("disable_oauth")):
+            raise ValueError("GCS requires a standard service account with an explicit project")
+        env["GOOGLE_SERVICE_ACCOUNT_PATH"] = str(path)
+    elif backend == "azure":
+        account = source.get("AZURE_STORAGE_ACCOUNT_NAME")
+        key, sas = source.get("AZURE_STORAGE_ACCOUNT_KEY"), source.get("AZURE_STORAGE_SAS_KEY")
+        if (not account or not 3 <= len(account) <= 24 or not account.isascii()
+                or any(char not in "abcdefghijklmnopqrstuvwxyz0123456789" for char in account)
+                or bool(key) == bool(sas)):
+            raise ValueError("Azure requires an explicit account and exactly one key or SAS")
+        env["AZURE_STORAGE_ACCOUNT_NAME"] = account
+        env["AZURE_STORAGE_ACCOUNT_KEY" if key else "AZURE_STORAGE_SAS_KEY"] = key or sas.lstrip("?")
+        endpoint, alternate = source.get("AZURE_STORAGE_ENDPOINT"), source.get("AZURE_ENDPOINT")
+        if endpoint and alternate and endpoint.rstrip("/") != alternate.rstrip("/"):
+            raise ValueError("Azure endpoint settings conflict")
+        if endpoint or alternate:
+            env["AZURE_STORAGE_ENDPOINT"] = endpoint or alternate
+    if env["DEOOS_STORAGE_PROVIDER"] == "s3":
+        env["AWS_BUCKET"] = bucket
+    endpoint = env.get("AWS_ENDPOINT") or env.get("AZURE_STORAGE_ENDPOINT")
+    if endpoint:
+        parsed = urllib.parse.urlsplit(endpoint)
+        allowed_http = env.get("AWS_ALLOW_HTTP", "").lower() == "true"
+        if (not parsed.hostname or parsed.username is not None or parsed.password is not None
+                or parsed.query or parsed.fragment
+                or parsed.scheme not in (("https", "http") if allowed_http else ("https",))):
+            raise ValueError("storage endpoint must be a valid base URL without credentials or query")
+    return env, bucket
+
+
+class OccupiedPrefixError(RuntimeError):
+    """The candidate namespace contains existing data and cannot be adopted."""
+
+
+class TestStorage:
+    """Small test-only cleanup helpers; never delete an external target."""
+    def __init__(self, backend, env):
+        self.backend, self.env = backend, env
+        self.bucket = env["DEOOS_STORAGE_BUCKET"]
+        if backend in ("rustfs", "s3", "r2"):
+            import boto3
+            from botocore.config import Config
+            self.client = boto3.client(
+                "s3", endpoint_url=env.get("AWS_ENDPOINT"), region_name=env["AWS_REGION"],
+                aws_access_key_id=env["AWS_ACCESS_KEY_ID"], aws_secret_access_key=env["AWS_SECRET_ACCESS_KEY"],
+                aws_session_token=env.get("AWS_SESSION_TOKEN"), config=Config(
+                    signature_version="s3v4", ignore_configured_endpoint_urls=True,
+                    s3={"addressing_style": "path"}))
+        elif backend == "gcs":
+            from google.cloud import storage
+            from google.oauth2 import service_account
+            credentials = service_account.Credentials.from_service_account_file(env["GOOGLE_SERVICE_ACCOUNT_PATH"])
+            self.client = storage.Client(project=credentials.project_id, credentials=credentials,
+                                         client_options={"api_endpoint": "https://storage.googleapis.com"})
+        else:
+            from azure.core.credentials import AzureNamedKeyCredential, AzureSasCredential
+            from azure.storage.blob import BlobServiceClient
+            account = env["AZURE_STORAGE_ACCOUNT_NAME"]
+            credential = (AzureNamedKeyCredential(account, env["AZURE_STORAGE_ACCOUNT_KEY"])
+                          if "AZURE_STORAGE_ACCOUNT_KEY" in env
+                          else AzureSasCredential(env["AZURE_STORAGE_SAS_KEY"]))
+            self.client = BlobServiceClient(
+                env.get("AZURE_STORAGE_ENDPOINT", f"https://{account}.blob.core.windows.net"),
+                credential=credential)
+
+    @staticmethod
+    def boundary(prefix):
+        if (not prefix.startswith("use-cases-") or len(prefix) != len("use-cases-") + 32
+                or any(char not in "0123456789abcdef" for char in prefix[len("use-cases-"):])):
+            raise ValueError("cleanup requires the exact generated run prefix")
+        return prefix + "/"
+
+    def names(self, prefix):
+        boundary = self.boundary(prefix)
+        if self.backend in ("rustfs", "s3", "r2"):
+            names = [item["Key"] for page in self.client.get_paginator("list_objects_v2").paginate(
+                Bucket=self.bucket, Prefix=boundary) for item in page.get("Contents", [])]
+        elif self.backend == "gcs":
+            names = [blob.name for blob in self.client.list_blobs(self.bucket, prefix=boundary)]
+        else:
+            container = self.client.get_container_client(self.bucket)
+            names = [blob.name for blob in container.list_blobs(name_starts_with=boundary)]
+        assert all(name.startswith(boundary) for name in names), "provider returned an object outside owned prefix"
+        return names
+
+    def delete_prefix(self, prefix):
+        names = self.names(prefix)
+        if self.backend in ("rustfs", "s3", "r2"):
+            for offset in range(0, len(names), 1000):
+                result = self.client.delete_objects(
+                    Bucket=self.bucket, Delete={"Objects": [{"Key": name} for name in names[offset:offset + 1000]]})
+                assert not result.get("Errors"), "owned-prefix object deletion failed"
+        elif self.backend == "gcs":
+            bucket = self.client.bucket(self.bucket)
+            for name in names:
+                bucket.blob(name).delete()
+        else:
+            container = self.client.get_container_client(self.bucket)
+            for offset in range(0, len(names), 256):
+                list(container.delete_blobs(*names[offset:offset + 256], delete_snapshots="include"))
+        assert self.names(prefix) == [], "owned-prefix live objects remain after deletion"
+        return len(names)
+
+    def create_local_bucket(self):
+        assert self.backend == "rustfs", "external targets must already exist"
+        self.client.create_bucket(Bucket=self.bucket)
+
+    def delete_local_bucket(self):
+        assert self.backend == "rustfs", "external targets must be preserved"
+        from botocore.exceptions import ClientError
+        self.client.delete_bucket(Bucket=self.bucket)
+        try:
+            self.client.head_bucket(Bucket=self.bucket)
+        except ClientError as error:
+            assert error.response["ResponseMetadata"]["HTTPStatusCode"] == 404
+        else:
+            raise AssertionError("generated local test bucket still exists")
+
+    def close(self):
+        self.client.close()
 
 
 def wait(predicate, timeout=15):
@@ -47,18 +226,18 @@ def stop(process):
         process.wait(timeout=10)
 
 
-def write_report(report):
-    REPORT.parent.mkdir(parents=True, exist_ok=True)
-    temporary = REPORT.with_suffix(".tmp")
+def write_report(report, path=REPORT):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(".tmp")
     temporary.write_text(json.dumps(report, indent=2) + "\n")
-    temporary.replace(REPORT)
+    temporary.replace(path)
 
 
-def qualify_local_storage(env):
-    probe_env = dict(env, EXECUTION_PREFIX="use-cases/qualification/" + uuid.uuid4().hex)
+def qualify_storage(env):
+    probe_env = dict(env, EXECUTION_PREFIX=env["EXECUTION_PREFIX"] + "/storage-check")
     result = subprocess.run([str(SERVER), "--check-storage"], env=probe_env, cwd=ROOT,
                             capture_output=True, text=True, timeout=30)
-    assert result.returncode == 0, "native local-storage qualification failed"
+    assert result.returncode == 0, "native storage qualification failed"
     probe = json.loads(result.stdout)
     assert probe["passed"] is True and probe["cleaned"] is True
     assert probe["writers"] == 32
@@ -77,7 +256,8 @@ def check_cli_redaction(env):
     # cloud request is reached.
     canary = "review-secret-canary"
     malformed_endpoint = "https://?sig=" + canary
-    child_env = dict(env, DEOOS_STORAGE_PROVIDER="azure", DEOOS_STORAGE_BUCKET="fake-container",
+    child_env = {key: value for key, value in env.items() if not key.startswith("AZURE_")}
+    child_env.update(DEOOS_STORAGE_PROVIDER="azure", DEOOS_STORAGE_BUCKET="fake-container",
                      AZURE_STORAGE_ACCOUNT_NAME="fakeaccount", AZURE_STORAGE_USE_EMULATOR="false",
                      AZURE_STORAGE_ENDPOINT=malformed_endpoint, AZURE_ENDPOINT=malformed_endpoint)
     result = subprocess.run([str(SERVER), "--check-storage"], env=child_env, cwd=ROOT,
@@ -251,8 +431,9 @@ class WorkflowCase:
     def __init__(self, mode, first, second, env, work, fixture):
         self.mode, self.first, self.second = mode, first, second
         self.fixture, self.work = fixture, work
+        run_prefix = env.get("EXECUTION_PREFIX") or "use-cases-" + uuid.uuid4().hex
         self.env = dict(env, DEOOS_MODE=mode, SERVICE_URL=fixture.url,
-                        EXECUTION_PREFIX=f"use-cases/{mode}/{first}/{uuid.uuid4().hex}")
+                        EXECUTION_PREFIX=f"{run_prefix}/{mode}/{first}")
         self.processes = []
         self.server = None
         if mode == "server":
@@ -270,8 +451,9 @@ class WorkflowCase:
         self.worker_env = dict(self.env, PYTHONPATH=str(ROOT / "clients/python"))
         if mode == "server":
             for key in list(self.worker_env):
-                if key.startswith(("AWS_", "DEOOS_STORAGE_")) or key in {
-                    "EXECUTION_PREFIX", "DEOOS_NATIVE_LIBRARY", "DEOOS_NODE_LIBRARY",
+                if key.startswith(("AWS_", "GOOGLE_", "AZURE_", "DEOOS_STORAGE_")) or key in {
+                    "SERVICE_ACCOUNT", "EXECUTION_PREFIX", "DEOOS_NATIVE_LIBRARY", "DEOOS_NODE_LIBRARY",
+                    "STORAGE_EMULATOR_HOST", "API_ENDPOINT_OVERRIDE",
                 }:
                     self.worker_env.pop(key)
 
@@ -543,22 +725,63 @@ class WorkflowCase:
             stop(process)
 
 
-def main():
-    import boto3
-    from botocore.exceptions import ClientError
+def check_occupied_prefix_preserved():
+    """Inject existing external data into the actual admission/cleanup path."""
+    from unittest.mock import patch
 
-    bucket = "deoos-use-cases-" + uuid.uuid4().hex[:20]
-    env = dict(os.environ, AWS_ACCESS_KEY_ID="local-development",
-               AWS_SECRET_ACCESS_KEY="local-development-only-secret", AWS_REGION="us-east-1",
-               AWS_ENDPOINT="http://127.0.0.1:19000", AWS_ALLOW_HTTP="true",
-               AWS_BUCKET=bucket, DEOOS_STORAGE_PROVIDER="s3", DEOOS_STORAGE_BUCKET=bucket,
-               LEASE_MS="1500")
-    for key in ("AWS_SESSION_TOKEN", "ENGINE_BIND", "ENGINE_URL", "ENGINE_TOKEN",
-                "DEOOS_NATIVE_LIBRARY", "DEOOS_NODE_LIBRARY"):
-        env.pop(key, None)
-    s3 = boto3.client("s3", endpoint_url=env["AWS_ENDPOINT"], region_name="us-east-1",
-                      aws_access_key_id=env["AWS_ACCESS_KEY_ID"],
-                      aws_secret_access_key=env["AWS_SECRET_ACCESS_KEY"])
+    prefix = "use-cases-" + "0" * 32
+    existing = {prefix + "/state.json": b"preexisting data must survive"}
+    reports = []
+
+    class ExistingStorage:
+        def __init__(self):
+            self.objects = dict(existing)
+            self.delete_calls = 0
+            self.closed = False
+
+        def names(self, candidate):
+            assert candidate == prefix
+            return list(self.objects)
+
+        def delete_prefix(self, candidate):
+            self.delete_calls += 1
+            self.objects.clear()
+            return len(existing)
+
+        def close(self):
+            self.closed = True
+
+    storage = ExistingStorage()
+    env = {"DEOOS_STORAGE_PROVIDER": "s3", "DEOOS_STORAGE_BUCKET": "precreated-fixture",
+           "EXECUTION_PREFIX": prefix}
+    replacements = {
+        "storage_environment": lambda backend, bucket: (env, "precreated-fixture"),
+        "TestStorage": lambda backend, environment: storage,
+        "write_report": lambda report, path: reports.append(json.loads(json.dumps(report))),
+    }
+    with patch.dict(globals(), replacements):
+        try:
+            main("s3", "precreated-fixture")
+        except OccupiedPrefixError:
+            pass
+        else:
+            raise AssertionError("occupied external namespace was admitted")
+    assert storage.objects == existing and storage.delete_calls == 0
+    assert storage.closed
+    rejected = reports[-1]
+    assert rejected["prefix_preflight"] == "occupied" and not rejected["prefix_owned"]
+    assert not rejected["success"] and not rejected["cleaned"] and rejected["cases"] == []
+    assert rejected["error_type"] == "OccupiedPrefixError" and "owned_prefix" not in rejected
+    assert rejected["cleanup_skipped_reason"] == "namespace_ownership_not_acquired"
+    return {"passed": True, "occupied_prefix_rejected": True,
+            "preexisting_object_preserved": True, "delete_calls": 0,
+            "acceptance_success": False, "namespace_owned": False}
+
+
+def main(backend="rustfs", bucket=None):
+    env, bucket = storage_environment(backend, bucket)
+    prefix = env["EXECUTION_PREFIX"]
+    report_path = ROOT.parent / "outputs/evidence" / f"use-cases-{backend}.json"
     # Native overrides were removed above, so these are the exact defaults chosen
     # by deoos.native.NativeEngine and the TypeScript SDK's createRequire loader.
     python_native_name = {"Darwin": "libdeoos_engine.dylib", "Linux": "libdeoos_engine.so",
@@ -568,8 +791,12 @@ def main():
                  ROOT / "clients/python/deoos/native" / python_native_name,
                  ROOT / "clients/typescript/dist/index.js",
                  ROOT / "clients/typescript/dist/native/deoos_node.node"]
-    report = {"backend": "local RustFS", "provider": env["DEOOS_STORAGE_PROVIDER"],
-              "endpoint": env["AWS_ENDPOINT"], "bucket": bucket,
+    report = {"backend": "local RustFS" if backend == "rustfs" else backend,
+              "provider": env["DEOOS_STORAGE_PROVIDER"], "bucket": bucket,
+              "candidate_prefix": prefix, "prefix_owned": False, "prefix_preflight": "pending",
+              "external_target": backend != "rustfs",
+              "cleanup_scope": "generated local bucket" if backend == "rustfs" else "owned-prefix live objects",
+              "custom_endpoint": bool(env.get("AWS_ENDPOINT") or env.get("AZURE_STORAGE_ENDPOINT")),
               "started": datetime.datetime.now(datetime.timezone.utc).isoformat(),
               "integration": "simulated HTTP service; in-memory external idempotency ledger",
               "python": sys.version.split()[0],
@@ -577,16 +804,27 @@ def main():
               "artifacts": {str(path.relative_to(ROOT)): hashlib.sha256(path.read_bytes()).hexdigest()
                             for path in artifacts},
               "cases": [], "success": False, "cleaned": False, "cleanup_errors": []}
-    created, fixture, case = False, None, None
-    write_report(report)
+    if backend == "rustfs":
+        report["endpoint"] = env["AWS_ENDPOINT"]
+    storage, fixture, case = None, None, None
+    prefix_owned = False
+    write_report(report, report_path)
     try:
-        s3.create_bucket(Bucket=bucket)
-        created = True
-        report["storage_probe"] = qualify_local_storage(env)
-        assert not s3.list_objects_v2(Bucket=bucket).get("Contents"), "qualification left objects in the test bucket"
+        storage = TestStorage(backend, env)
+        if backend == "rustfs":
+            storage.create_local_bucket()
+        # A successful scoped list also proves an external target already exists.
+        if storage.names(prefix):
+            report["prefix_preflight"] = "occupied"
+            raise OccupiedPrefixError()
+        prefix_owned = True
+        report.update(prefix_owned=True, prefix_preflight="empty", owned_prefix=prefix)
+        report["prefix_ownership_gate"] = check_occupied_prefix_preserved()
+        report["storage_probe"] = qualify_storage(env)
+        assert storage.names(prefix) == [], "qualification left live objects under the owned prefix"
         report["cli_redaction"] = check_cli_redaction(env)
         report["runtime_redaction"] = check_runtime_redaction(env)
-        write_report(report)
+        write_report(report, report_path)
         with tempfile.TemporaryDirectory(prefix="deoos-use-cases-") as scratch:
             work = pathlib.Path(scratch)
             for filename in ("use_cases.py", "use_cases.mjs"):
@@ -599,14 +837,14 @@ def main():
                     case = WorkflowCase(mode, first, second, env, work, fixture)
                     try:
                         report["cases"].append(case.run())
-                        write_report(report)
+                        write_report(report, report_path)
                         print(f"passed {mode}: {first} -> {second}", flush=True)
                     finally:
                         case.close()
                         case = None
         report["success"] = True
     except BaseException as error:
-        report["error"] = f"{type(error).__name__}: {error}"
+        report["error_type"] = type(error).__name__
         raise
     finally:
         for label, cleanup in (("workers and server", lambda: case.close() if case else None),
@@ -614,25 +852,29 @@ def main():
             try:
                 cleanup()
             except Exception as error:
-                report["cleanup_errors"].append(f"{label}: {error}")
-        if created:
+                report["cleanup_errors"].append({"stage": label, "error_type": type(error).__name__})
+        if storage is not None and prefix_owned:
             try:
-                for page in s3.get_paginator("list_objects_v2").paginate(Bucket=bucket):
-                    objects = [{"Key": item["Key"]} for item in page.get("Contents", [])]
-                    if objects:
-                        assert not s3.delete_objects(Bucket=bucket, Delete={"Objects": objects}).get("Errors")
-                s3.delete_bucket(Bucket=bucket)
-                try:
-                    s3.head_bucket(Bucket=bucket)
-                except ClientError as error:
-                    assert error.response["ResponseMetadata"]["HTTPStatusCode"] == 404
+                report["deleted_live_objects"] = storage.delete_prefix(prefix)
+                report["owned_prefix_absent"] = True
+                if backend == "rustfs":
+                    storage.delete_local_bucket()
                 else:
-                    raise AssertionError("exact test bucket still exists after deletion")
+                    # The successful absence re-list preserves the precreated target;
+                    # no external bucket/container deletion method is called.
+                    report["external_target_preserved"] = True
                 report["cleaned"] = True
             except Exception as error:
-                report["cleanup_errors"].append(f"bucket: {error}")
-        write_report(report)
-    assert report["cleaned"] and not report["cleanup_errors"], report
+                report["cleanup_errors"].append({"stage": "owned storage", "error_type": type(error).__name__})
+        elif storage is not None:
+            report["cleanup_skipped_reason"] = "namespace_ownership_not_acquired"
+        if storage is not None:
+            try:
+                storage.close()
+            except Exception as error:
+                report["cleanup_errors"].append({"stage": "storage client", "error_type": type(error).__name__})
+        write_report(report, report_path)
+    assert report["cleaned"] and not report["cleanup_errors"], "acceptance cleanup failed"
     print(json.dumps(report, indent=2))
 
 
@@ -640,6 +882,8 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--serve", action="store_true", help="run only the simulated integration service")
     parser.add_argument("--port", type=int, default=18080, help="loopback fixture port (default: 18080)")
+    parser.add_argument("--backend", choices=("rustfs", "s3", "r2", "gcs", "azure"), default="rustfs")
+    parser.add_argument("--bucket", help="precreated dedicated external bucket/container; never created or deleted")
     args = parser.parse_args()
     if args.serve:
         fixture = IntegrationFixture(args.port)
@@ -652,4 +896,8 @@ if __name__ == "__main__":
         finally:
             fixture.close()
     else:
-        main()
+        try:
+            main(args.backend, args.bucket)
+        except BaseException as error:
+            print(f"acceptance failed: {type(error).__name__}", file=sys.stderr)
+            raise SystemExit(1) from None
