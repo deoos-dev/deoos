@@ -58,9 +58,10 @@ def storage_environment(backend, bucket):
            if not key.startswith(("AWS_", "GOOGLE_", "AZURE_", "DEOOS_STORAGE_"))
            and key not in {"SERVICE_ACCOUNT", "ENGINE_BIND", "ENGINE_URL", "ENGINE_TOKEN",
                            "DEOOS_NATIVE_LIBRARY", "DEOOS_NODE_LIBRARY"}}
+    # Remote runs use the engine's normal lease; local expiry tests stay fast.
     env.update(DEOOS_STORAGE_PROVIDER="s3" if backend in ("rustfs", "s3", "r2") else backend,
                DEOOS_STORAGE_BUCKET=bucket, EXECUTION_PREFIX="use-cases-" + uuid.uuid4().hex,
-               LEASE_MS="1500")
+               LEASE_MS="1500" if backend == "rustfs" else "30000")
     if backend == "rustfs":
         env.update(AWS_ACCESS_KEY_ID="local-development", AWS_SECRET_ACCESS_KEY="local-development-only-secret",
                    AWS_REGION="us-east-1", AWS_ENDPOINT="http://127.0.0.1:19000", AWS_ALLOW_HTTP="true")
@@ -711,7 +712,8 @@ class WorkflowCase:
         self.fixture.hold_event = None
         self.fixture.release_response.set()
         self.restart_server()
-        wait(lambda: int(time.time() * 1000) > self.inspect(event)["expires_at"])
+        wait(lambda: int(time.time() * 1000) > self.inspect(event)["expires_at"],
+             timeout=int(self.env["LEASE_MS"]) / 1000 + 15)
         self.work_once(self.second)
         completed = self.inspect(event)
         requests = self.fixture.requests_for(event)
@@ -760,7 +762,7 @@ def check_occupied_prefix_preserved():
 
     storage = ExistingStorage()
     env = {"DEOOS_STORAGE_PROVIDER": "s3", "DEOOS_STORAGE_BUCKET": "precreated-fixture",
-           "EXECUTION_PREFIX": prefix}
+           "EXECUTION_PREFIX": prefix, "LEASE_MS": "30000"}
     replacements = {
         "storage_environment": lambda backend, bucket: (env, "precreated-fixture"),
         "TestStorage": lambda backend, environment: storage,
@@ -804,6 +806,7 @@ def main(backend="rustfs", bucket=None):
               "external_target": backend != "rustfs",
               "cleanup_scope": "generated local bucket" if backend == "rustfs" else "owned-prefix live objects",
               "custom_endpoint": bool(env.get("AWS_ENDPOINT") or env.get("AZURE_STORAGE_ENDPOINT")),
+              "lease_ms": int(env["LEASE_MS"]),
               "started": datetime.datetime.now(datetime.timezone.utc).isoformat(),
               "integration": "simulated HTTP service; in-memory external idempotency ledger",
               "python": sys.version.split()[0],
