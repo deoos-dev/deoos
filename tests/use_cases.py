@@ -518,18 +518,25 @@ class WorkflowCase:
         assert retry["status"] == "queued" and retry["attempts"] == 1
         assert "deliver" not in retry["steps"] and not self.fixture.effects_for(event)
         if int(time.time() * 1000) < retry["available_at"]:
-            assert self.work_once(self.second) == {"worked": False}
+            # Process startup and storage requests can cross the retry deadline.
+            early = self.work_once(self.second)
+            assert set(early) == {"worked"} and isinstance(early["worked"], bool)
         wait(lambda: int(time.time() * 1000) >= retry["available_at"])
         self.work_once(self.second)
         completed = self.inspect(event)
         requests = self.fixture.requests_for(event)
         assert completed["status"] == "completed" and completed["attempts"] == 2
+        retry_claims = [entry for entry in completed["history"]
+                        if entry["event"] == "claim" and entry["attempts"] == 2]
+        assert len(retry_claims) == 1
+        assert retry_claims[0]["at_ms"] >= retry["available_at"]
         assert completed["output"] == {"event_id": event, "status": "delivered"}
         assert len(requests) == 2 and len({request["key"] for request in requests}) == 1
         assert len(self.fixture.effects_for(event)) == 1
         assert self.work_once(self.first) == {"worked": False}
         results.append({"case": "transient HTTP 503", "requests": 2, "effects": 1,
-                        "attempts": completed["attempts"]})
+                        "attempts": completed["attempts"], "retry_available_at_ms": retry["available_at"],
+                        "retry_claim_at_ms": retry_claims[0]["at_ms"]})
 
         # The public continuous command catches a transient handler error, waits,
         # and retries in its original process instead of requiring a supervisor.
