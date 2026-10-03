@@ -454,6 +454,30 @@ c.close()
     subprocess.run([sys.executable,'-c',contract_resume],env=env,check=True,capture_output=True,text=True)
     assert a.request('/tasks/contracts')['status']=='completed'
     child_id='child-'+hashlib.sha256(b'contracts/plain').hexdigest()[:32];expect_status(404,lambda:a.request('/tasks/'+child_id))
+    # A caught definition conflict must not poison TypeScript's ownership state.
+    a.submit('contracts-typescript','contracts',{},max_attempts=1)
+    subprocess.run(['node','--input-type=module','-e',script],cwd=ROOT,env=env,check=True,capture_output=True,text=True)
+    a.signal('contracts-typescript','continue',True)
+    contract_resume_ts=node_header+"""
+import {EngineError} from './clients/typescript/dist/index.js';
+await c.runOnce({contracts:async ctx=>{
+ const forbidden=()=>{throw new Error('incompatible callback executed');};
+ const changes=[()=>ctx.step('plain',forbidden,'2'),()=>ctx.sleep('plain',0),()=>ctx.waitSignal('slept'),()=>ctx.sleep('slept',1),()=>ctx.join('joined',['does-not-exist']),()=>ctx.spawn('plain','should-not-exist',{}),()=>ctx.spawn('spawned','unused-child',{number:6})];
+ for(const change of changes){
+  try{await change();throw new Error('changed definition accepted');}
+  catch(error){if(!(error instanceof EngineError)||error.status!==409)throw error;}
+ }
+ if(await ctx.step('plain',forbidden,'1')!==42)throw new Error('cached step changed');
+ await ctx.sleep('slept',0);
+ if(JSON.stringify(await ctx.join('joined',[]))!=='[]')throw new Error('cached join changed');
+ await ctx.spawn('spawned','unused-child',{number:5});
+ return ctx.waitSignal('continue');
+}});
+"""
+    subprocess.run(['node','--input-type=module','-e',contract_resume_ts],cwd=ROOT,env=env,check=True,capture_output=True,text=True)
+    state=a.request('/tasks/contracts-typescript');assert state['status']=='completed' and state['output'] is True and state['attempts']==1
+    child_id='child-'+hashlib.sha256(b'contracts-typescript/plain').hexdigest()[:32];expect_status(404,lambda:a.request('/tasks/'+child_id))
+    passed.append('TypeScript catches definition conflicts then replays valid checkpoints without callbacks or incompatible child creation')
     a.submit('missing-contract','missing-contract',{})
     task=a.request('/claim',{'worker':'missing','handlers':['missing-contract']})['task']
     expect_status(409,lambda:a.request('/tasks/missing-contract/steps/unknown',{'token':task['token'],'operation_id':'no-contract','value':True}))
