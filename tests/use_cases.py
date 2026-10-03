@@ -28,6 +28,7 @@ import os
 import pathlib
 import platform
 import shutil
+import signal
 import socket
 import subprocess
 import sys
@@ -333,6 +334,7 @@ class IntegrationFixture:
         self.effects = {}
         self.fail_once = set()
         self.hold_event = None
+        self.hold_events = set()
         self.effect_committed = threading.Event()
         self.release_response = threading.Event()
         fixture = self
@@ -399,7 +401,7 @@ class IntegrationFixture:
                                     prior = fixture.effects[identity] = {"body": body, "result": result}
                             if prior is not None:
                                 response = (200, prior["result"])
-                    hold = identifier == fixture.hold_event and not transient
+                    hold = (identifier == fixture.hold_event or identifier in fixture.hold_events) and not transient
                 if hold:
                     fixture.effect_committed.set()
                     fixture.release_response.wait(20)
@@ -728,7 +730,113 @@ class WorkflowCase:
         return {"mode": self.mode, "first_language": self.first,
                 "replacement_language": self.second, "passed": results}
 
+    def run_recovery_under_load(self):
+        assert os.name == "posix", "recovery under load requires SIGKILL"
+        identifiers = [f"backlog-{self.mode}-{self.first}-{number:02d}" for number in range(20)]
+        target = identifiers[0]
+        for identifier in identifiers:
+            self.cli(self.first, "submit", "webhook", "--id", identifier, "--event-id", identifier)
+
+        def inspect_all():
+            # One independent client reads every admitted ID, without twenty process startups.
+            script = ("import json,sys; from use_cases import create_client; c=create_client();\n"
+                      "try: print(json.dumps([c.inspect(identifier) for identifier in sys.argv[1:]]))\n"
+                      "finally: c.close()\n")
+            result = subprocess.run([sys.executable, "-c", script, *identifiers], cwd=self.work,
+                                    env=self.worker_env, capture_output=True, text=True, timeout=30)
+            assert result.returncode == 0, result.stderr
+            return json.loads(result.stdout)
+
+        def start_worker(language, once=False):
+            worker = subprocess.Popen(self.argv(language, "work", *(("--once",) if once else ())),
+                                      cwd=self.work, env=self.worker_env,
+                                      stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+            self.processes.append(worker)
+            return worker
+
+        self.fixture.hold_events = set(identifiers[:4])
+        self.fixture.effect_committed.clear()
+        self.fixture.release_response.clear()
+        primary = start_worker(self.first, once=True)
+        assert self.fixture.effect_committed.wait(8), "designated worker never reached the HTTP barrier"
+        assert primary.poll() is None
+        assert len(self.fixture.effects_for(target)) == 1, "designated worker claimed a different task"
+        designated = self.inspect(target)
+        companions = [start_worker(self.second) for _ in range(3)]
+
+        def four_busy_with_backlog():
+            assert all(worker.poll() is None for worker in [primary, *companions]), "worker exited before kill"
+            states = inspect_all()
+            assert not any(state["status"] in ("failed", "cancelled") for state in states)
+            if not all(state["status"] == "running" and "deliver" not in state["steps"]
+                       and len(self.fixture.effects_for(state["id"])) == 1 for state in states[:4]):
+                return None
+            assert all(state["status"] == "queued" and state["attempts"] == 0 for state in states[4:])
+            assert all(state["attempts"] == 1 for state in states[:4])
+            assert len({state["owner"] for state in states[:4]}) == 4
+            return states
+
+        before_kill = wait(four_busy_with_backlog, timeout=8)
+        crashed = before_kill[0]
+        assert crashed["token"] == designated["token"] and crashed["owner"] == designated["owner"]
+        assert all(len(self.fixture.requests_for(identifier)) == 1 for identifier in identifiers[:4])
+        stop(primary)
+        assert primary.returncode == -signal.SIGKILL, "designated worker was not killed by SIGKILL"
+        crashed = self.inspect(target)
+        assert crashed["status"] == "running" and crashed["attempts"] == 1 and "deliver" not in crashed["steps"]
+        assert crashed["token"] == designated["token"] and crashed["owner"] == designated["owner"]
+        saved_expiry = crashed["expires_at"]
+        _, stderr = primary.communicate(timeout=10)
+        assert not stderr, stderr
+        self.fixture.hold_events.clear()
+        self.fixture.release_response.set()
+        replacement = start_worker(self.second)
+        survivors = [*companions, replacement]
+
+        def all_completed():
+            assert all(worker.poll() is None for worker in survivors), "recovery worker exited early"
+            states = inspect_all()
+            assert not any(state["status"] in ("failed", "cancelled") for state in states)
+            return states if all(state["status"] == "completed" for state in states) else None
+
+        completed = wait(all_completed, timeout=int(self.env["LEASE_MS"]) / 1000 + 45)
+        for worker in survivors:
+            stop(worker)
+            _, stderr = worker.communicate(timeout=10)
+            assert not stderr, stderr
+        recovered = completed[0]
+        claims = [entry for entry in recovered["history"]
+                  if entry["event"] == "claim" and entry["attempts"] == 2]
+        assert len(claims) == 1 and claims[0]["at_ms"] >= saved_expiry
+        assert recovered["attempts"] == 2 and recovered["generation"] == crashed["generation"] + 1
+        assert recovered["owner"] != crashed["owner"]
+        assert all(state["attempts"] == 1 for state in completed[1:])
+        requests, task_results = [], []
+        for state in completed:
+            identifier = state["id"]
+            assert state["output"] == {"event_id": identifier, "status": "delivered"}
+            assert "deliver" in state["steps"]
+            calls = self.fixture.requests_for(identifier)
+            assert len(calls) == (2 if identifier == target else 1)
+            assert {call["key"] for call in calls} == {identifier + "/deliver"}
+            assert len(self.fixture.effects_for(identifier)) == 1
+            requests.extend(calls)
+            task_results.append({"id": identifier, "status": state["status"], "attempts": state["attempts"],
+                                 "requests": len(calls), "effects": 1, "idempotency_key": calls[0]["key"]})
+        assert len(requests) == 21
+        return {"mode": self.mode, "first_language": self.first, "replacement_language": self.second,
+                "admitted": 20, "running_at_kill": 4, "queued_at_kill": 16,
+                "completed": 20, "failed": 0, "cancelled": 0, "remaining": 0,
+                "requests": 21, "effects": 20, "same_idempotency_key_per_id": True,
+                "target": {"id": target, "killed_pid": primary.pid, "returncode": primary.returncode,
+                           "checkpoint_before_kill": False, "attempts": recovered["attempts"],
+                           "saved_lease_expires_at_ms": saved_expiry, "recovery_claim_at_ms": claims[0]["at_ms"]},
+                "replacement_pid": replacement.pid, "companion_pids": [worker.pid for worker in companions],
+                "workers_stopped": all(worker.poll() is not None for worker in [primary, *survivors]),
+                "worker_errors": [], "tasks": task_results}
+
     def close(self):
+        self.fixture.hold_events.clear()
         self.fixture.release_response.set()
         for process in reversed(self.processes):
             stop(process)
@@ -787,10 +895,11 @@ def check_occupied_prefix_preserved():
             "acceptance_success": False, "namespace_owned": False}
 
 
-def main(backend="rustfs", bucket=None):
+def main(backend="rustfs", bucket=None, recovery_under_load=False):
     env, bucket = storage_environment(backend, bucket)
     prefix = env["EXECUTION_PREFIX"]
-    report_path = ROOT.parent / "outputs/evidence" / f"use-cases-{backend}.json"
+    suite = "use-cases-recovery-under-load" if recovery_under_load else "use-cases"
+    report_path = ROOT.parent / "outputs/evidence" / f"{suite}-{backend}.json"
     # Native overrides were removed above, so these are the exact defaults chosen
     # by deoos.native.NativeEngine and the TypeScript SDK's createRequire loader.
     python_native_name = {"Darwin": "libdeoos_engine.dylib", "Linux": "libdeoos_engine.so",
@@ -800,6 +909,8 @@ def main(backend="rustfs", bucket=None):
                  ROOT / "clients/python/deoos/native" / python_native_name,
                  ROOT / "clients/typescript/dist/index.js",
                  ROOT / "clients/typescript/dist/native/deoos_node.node"]
+    if recovery_under_load:
+        artifacts.append(ROOT / "tests/use_cases.py")
     report = {"backend": "local RustFS" if backend == "rustfs" else backend,
               "provider": env["DEOOS_STORAGE_PROVIDER"], "bucket": bucket,
               "candidate_prefix": prefix, "prefix_owned": False, "prefix_preflight": "pending",
@@ -814,6 +925,8 @@ def main(backend="rustfs", bucket=None):
               "artifacts": {str(path.relative_to(ROOT)): hashlib.sha256(path.read_bytes()).hexdigest()
                             for path in artifacts},
               "cases": [], "success": False, "cleaned": False, "cleanup_errors": []}
+    if recovery_under_load:
+        report.update(suite="recovery under load", recovery_cases=[])
     if backend == "rustfs":
         report["endpoint"] = env["AWS_ENDPOINT"]
     storage, fixture, case = None, None, None
@@ -844,9 +957,18 @@ def main(backend="rustfs", bucket=None):
             fixture = IntegrationFixture()
             for mode in ("library", "server"):
                 for first, second in (("python", "typescript"), ("typescript", "python")):
-                    case = WorkflowCase(mode, first, second, env, work, fixture)
+                    case_env = dict(env, EXECUTION_PREFIX=prefix + "/recovery") if recovery_under_load else env
+                    case = WorkflowCase(mode, first, second, case_env, work, fixture)
                     try:
-                        report["cases"].append(case.run())
+                        if recovery_under_load:
+                            result = case.run_recovery_under_load()
+                            server_pid = case.server.pid if case.server else None
+                            case.close()
+                            assert all(process.poll() is not None for process in case.processes)
+                            result.update(server_pid=server_pid, server_stopped=True, processes_stopped=True)
+                            report["recovery_cases"].append(result)
+                        else:
+                            report["cases"].append(case.run())
                         write_report(report, report_path)
                         print(f"passed {mode}: {first} -> {second}", flush=True)
                     finally:
@@ -863,7 +985,7 @@ def main(backend="rustfs", bucket=None):
                 cleanup()
             except Exception as error:
                 report["cleanup_errors"].append({"stage": label, "error_type": type(error).__name__})
-        if storage is not None and prefix_owned:
+        if storage is not None and prefix_owned and (not recovery_under_load or not report["cleanup_errors"]):
             try:
                 report["deleted_live_objects"] = storage.delete_prefix(prefix)
                 report["owned_prefix_absent"] = True
@@ -877,12 +999,16 @@ def main(backend="rustfs", bucket=None):
             except Exception as error:
                 report["cleanup_errors"].append({"stage": "owned storage", "error_type": type(error).__name__})
         elif storage is not None:
-            report["cleanup_skipped_reason"] = "namespace_ownership_not_acquired"
+            report["cleanup_skipped_reason"] = ("process_or_fixture_cleanup_unconfirmed"
+                                                if prefix_owned else "namespace_ownership_not_acquired")
         if storage is not None:
             try:
                 storage.close()
             except Exception as error:
                 report["cleanup_errors"].append({"stage": "storage client", "error_type": type(error).__name__})
+        if recovery_under_load:
+            report["success"] = (report["success"] and len(report["recovery_cases"]) == 4
+                                 and report["cleaned"] and not report["cleanup_errors"])
         write_report(report, report_path)
     assert report["cleaned"] and not report["cleanup_errors"], "acceptance cleanup failed"
     print(json.dumps(report, indent=2))
@@ -894,6 +1020,8 @@ if __name__ == "__main__":
     parser.add_argument("--port", type=int, default=18080, help="loopback fixture port (default: 18080)")
     parser.add_argument("--backend", choices=("rustfs", "s3", "r2", "gcs", "azure"), default="rustfs")
     parser.add_argument("--bucket", help="precreated dedicated external bucket/container; never created or deleted")
+    parser.add_argument("--recovery-under-load", action="store_true",
+                        help="run the separate 20-webhook/four-worker crash recovery matrix")
     args = parser.parse_args()
     if args.serve:
         fixture = IntegrationFixture(args.port)
@@ -907,7 +1035,7 @@ if __name__ == "__main__":
             fixture.close()
     else:
         try:
-            main(args.backend, args.bucket)
+            main(args.backend, args.bucket, args.recovery_under_load)
         except BaseException as error:
             print(f"acceptance failed: {type(error).__name__}", file=sys.stderr)
             raise SystemExit(1) from None
