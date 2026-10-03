@@ -714,7 +714,7 @@ class WorkflowCase:
         self.fixture.hold_event = None
         self.fixture.release_response.set()
         self.restart_server()
-        wait(lambda: int(time.time() * 1000) > self.inspect(event)["expires_at"],
+        wait(lambda: self.inspect(event)["expires_at"] < int(time.time() * 1000),
              timeout=int(self.env["LEASE_MS"]) / 1000 + 15)
         self.work_once(self.second)
         completed = self.inspect(event)
