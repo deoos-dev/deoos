@@ -1,6 +1,6 @@
 # DEOOS - Durable Execution On Object Storage
 
-One Rust execution core, Python and TypeScript SDKs, and S3-compatible storage for authoritative state. Two deployment options:
+One Rust execution core, Python and TypeScript SDKs, and object storage for authoritative state. Two deployment options:
 
 | Mode | What runs | Storage credentials |
 | --- | --- | --- |
@@ -36,9 +36,9 @@ Releases contain an installable Python wheel, npm tarball, optional server execu
 
 Configure `AWS_BUCKET`, `AWS_REGION`, and AWS credentials in the environment. Temporary credentials need `AWS_SESSION_TOKEN` too. Explicit storage settings can also be passed to Client. Each execution worker uses the same bucket and prefix.
 
-AWS S3, RustFS and Cloudflare R2 are the tested storage backends. R2 passed the conditional-write contract and all 44 workflow checks in embedded and shared-server modes using the macOS ARM64 CI package and the default 30-second lease; this was a local Mac test, not cloud-local load qualification. Azure Blob Storage has partial qualification: the macOS ARM64 CI package passed the conditional-write contract and 22 embedded workflow checks, but shared-server inspection timed out after restart. Google Cloud Storage remains unqualified. RustFS is the recommended self-hosted target; distributed deployment and air-gapped operation still need separate qualification. Every supported backend must pass the same execution behavior tests.
+AWS S3, RustFS, Cloudflare R2, Google Cloud Storage and Azure Blob Storage are the tested storage backends. R2, GCS and Azure each passed the conditional-write contract and all 44 workflow checks in embedded and shared-server modes using the macOS ARM64 CI package and the default 30-second lease. These were local Mac tests against actual cloud storage, not cloud-local load qualification. Azure passed with unchanged SDK timeouts; an earlier restart timeout remains unexplained. RustFS is the recommended self-hosted target; distributed deployment and air-gapped operation still need separate qualification. Every supported backend must pass the same execution behavior tests.
 
-The native adapters select `s3` (default), `gcs` or `azure` through `DEOOS_STORAGE_PROVIDER` or the embedded client's `provider` option. `DEOOS_STORAGE_BUCKET` names the bucket or Azure container; `AWS_BUCKET` remains an S3 fallback. GCS and Azure construction is implemented; GCS real-service execution remains unverified. GCS uses native `GOOGLE_*` credentials; Azure uses native `AZURE_*` credentials. S3-specific credential/region options are rejected when selecting another provider. R2 uses the S3 adapter with its account API endpoint and region `auto`.
+The native adapters select `s3` (default), `gcs` or `azure` through `DEOOS_STORAGE_PROVIDER` or the embedded client's `provider` option. `DEOOS_STORAGE_BUCKET` names the bucket or Azure container; `AWS_BUCKET` remains an S3 fallback. GCS uses native `GOOGLE_*` credentials; Azure uses native `AZURE_*` credentials. S3-specific credential/region options are rejected when selecting another provider. R2 uses the S3 adapter with its account API endpoint and region `auto`.
 
 `deoos-server --check-storage` uses the configured store and creates one UUID-isolated object under `<prefix>/qualification/`. It races 32 creates and 32 conditional replacements, checks stale-writer rejection and immediate read/list visibility, then deletes the object. Failure exits nonzero, including unexpected throttling. This checks storage primitives only; qualification also requires the full SDK workflow and recovery suite in both deployment modes. Use a dedicated test bucket/container with no retention or versioning policy; the probe removes the live object, not historical versions retained by the provider. It never creates or deletes a bucket/container.
 
@@ -251,6 +251,8 @@ Direct AWS measurements from this macOS ARM64 host to us-east-1, with the unchan
 | 1,000 completed tasks, four checkpoints each | 0 / 3 | Timed out at about ten seconds |
 
 These observed timings include this host's network round trips; they are not universal task-count limits or measurements of an AWS-hosted deployment. Sequential state reads make accumulated terminal tasks a practical limit. This alpha suits small namespaces; sustained growth needs improved discovery. There is no automatic pruning or separate index. Increasing the client timeout does not remove the linear request cost. Measure your deployment before relying on a polling cadence.
+
+Separate local macOS ARM64/RustFS direct load runs recorded 800/800 webhook completions across eight cases and 451/600 ingestion completions across six cases; 149 ingestion workflows remained pending at the observation cutoff. One-worker retained ingestion bursts were skipped after the fresh burst timed out. These runs and the cloud runs differ in host, build, instrumentation and observation window, so their totals do not establish a capacity ratio.
 
 A bounded EC2/S3 workflow load run recorded 562 completions from 1,250 submitted workflows across 16 reports. All eight ingestion cases recorded zero completions within their 30–60-second windows. Local probes show that parent-first claiming and repeated state scans can delay child work; they do not establish the exact cloud cause or a throughput guarantee. Keep task counts per prefix small and measure your intended workload.
 

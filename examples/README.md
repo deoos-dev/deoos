@@ -16,9 +16,9 @@ The paired programs are `use_cases.py` and `use_cases.mjs`. They use only the DE
 
 In cloud deployments, run workers in the relevant cloud near the authoritative object store. In self-hosted deployments, run workers beside RustFS or on the same machine. Embedded mode puts Rust in each worker process; shared mode uses a separate engine service. Storage and destination services remain dependencies in either mode.
 
-AWS S3 and RustFS are currently qualified. GCS, Azure Blob and Cloudflare R2 remain qualification targets. Credentials, network routing and provider configuration differ; the execution behavior contract must remain the same.
+See the main guide for [verified provider coverage and its limits](../README.md#library-mode). Credentials, network routing and provider configuration differ; the execution behavior contract must remain the same.
 
-For embedded mode, configure `DEOOS_MODE=library`, `DEOOS_STORAGE_BUCKET`, storage credentials and optionally `EXECUTION_PREFIX`. `DEOOS_STORAGE_PROVIDER` selects `s3` (default), `gcs` or `azure`; the latter two adapters remain unqualified against real providers. For S3, configure `AWS_REGION`; `AWS_BUCKET` remains a compatible bucket setting. For local RustFS, also use `AWS_ENDPOINT=http://127.0.0.1:19000` and `AWS_ALLOW_HTTP=true`, with the development credentials in the repository's `compose.yaml`.
+For embedded mode, configure `DEOOS_MODE=library`, `DEOOS_STORAGE_BUCKET`, storage credentials and optionally `EXECUTION_PREFIX`. `DEOOS_STORAGE_PROVIDER` selects `s3` (default), `gcs` or `azure`. For S3, configure `AWS_REGION`; `AWS_BUCKET` remains a compatible bucket setting. For local RustFS, also use `AWS_ENDPOINT=http://127.0.0.1:19000` and `AWS_ALLOW_HTTP=true`, with the development credentials in the repository's `compose.yaml`.
 
 For shared mode, configure the engine with the storage settings, start `deoos-server`, then set `DEOOS_MODE=server`, `ENGINE_URL` and, if enabled, `ENGINE_TOKEN` on workers. Shared-server workers need no storage credentials.
 
