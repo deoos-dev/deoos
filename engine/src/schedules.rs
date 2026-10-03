@@ -399,11 +399,63 @@ async fn tick_one(e: &Engine, id: &str) -> Result<(), Error> {
     Err(conflict("contention; retry"))
 }
 pub(super) async fn tick(e: &Engine, handlers: &[String]) -> Result<(), Error> {
-    let mut schedules: Vec<_> = list(e)
-        .await?
-        .into_iter()
-        .filter(|s| handlers.contains(&s.handler))
+    let prefix = Key::from(format!("{}/schedules", e.prefix));
+    let expected = format!("{prefix}/");
+    let objects: Vec<_> = e
+        .store
+        .list(Some(&prefix))
+        .try_collect()
+        .await
+        .map_err(storage)?;
+    let candidates: Vec<_> = objects
+        .iter()
+        .filter_map(|object| {
+            object
+                .location
+                .as_ref()
+                .strip_prefix(&expected)
+                .and_then(|path| path.strip_suffix("/state.json"))
+                .filter(|id| valid(id))
+                .map(|id| (id, object))
+        })
         .collect();
+    let present = candidates.iter().map(|(id, _)| *id).collect();
+    e.discovery.lock().unwrap().retain_schedules(&present);
+    let mut schedules = Vec::new();
+    for (id, object) in candidates {
+        if e.discovery
+            .lock()
+            .unwrap()
+            .skip_schedule(id, object, handlers, now())
+        {
+            continue;
+        }
+        let (schedule, version) = match read(e, id).await {
+            Ok(value) => value,
+            Err((StatusCode::NOT_FOUND, _)) => continue,
+            Err(error) => return Err(error),
+        };
+        // Persisted fire intents precede pause and deadlines. Backfills also
+        // require tick_one's fresh overlap/cursor checks rather than a hint.
+        let dormant_until = if schedule.pending.is_some() {
+            0
+        } else if schedule.paused {
+            u64::MAX
+        } else if schedule.backfill.is_some() {
+            0
+        } else {
+            schedule.next_due_ms
+        };
+        e.discovery.lock().unwrap().remember_schedule(
+            id,
+            &schedule.handler,
+            &version,
+            dormant_until,
+        );
+        if handlers.contains(&schedule.handler) && dormant_until <= now() {
+            schedules.push(schedule);
+        }
+    }
     if !schedules.is_empty() {
         let start = (Uuid::new_v4().as_u128() % schedules.len() as u128) as usize;
         schedules.rotate_left(start);

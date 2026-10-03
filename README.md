@@ -215,7 +215,9 @@ For the UI, start the shared server and open `http://127.0.0.1:7331/ui` (or your
 
 ## Discovery and request costs
 
-Discovery has no separate index: an idle claim lists schedules, reads their state, then lists task objects and reads every task state, including completed tasks. Checkpoint objects add LIST pages but are not read during an idle claim. Each worker pays these reads on every poll. Task inspection by ID reads one state object; operator listing returns at most 100 states but enumerates all task objects first.
+Claims still list schedules and all task objects; there is no separate index. Each engine keeps bounded hints for up to 16,384 tasks and 16,384 schedules. Matching LIST change tokens let it skip unchanged terminal tasks, active leases, and dormant schedules. Changed tokens, or LIST results with no change tokens, require a state read. Eligible claims and waiting conditions are checked against fresh state, and conditional writes still control ownership. Restarting the engine or exceeding the hint capacity loses only the optimization. Checkpoint objects add LIST pages but are not read during an idle claim. Task inspection by ID reads one state object; operator listing returns at most 100 states but enumerates all task objects first.
+
+Normal task discovery rotates through IDs. A waiting parent can place its children and itself in a volatile priority queue capped at 1,024 IDs. After three priority reservations, the next claim starts with normal discovery. This gives unrelated work opportunities within that engine; it does not guarantee global ordering or a completion deadline. The queue adds no durable objects or external services.
 
 Measured on macOS ARM64 with the 0.5 engine and local RustFS, three samples per row gave identical request counts in library and shared-server claim tests:
 
@@ -231,7 +233,7 @@ The last row includes another read for each of the ten schedules selected for ti
 
 For S3 Standard in us-east-1, the published rates are $0.005 per 1,000 LIST/PUT requests, $0.0004 per 1,000 GET/HEAD requests and $0.023 per GB-month of storage. See [AWS request rates](https://aws.amazon.com/blogs/storage/run-spark-31-faster-and-optimize-compute-costs-with-amazon-s3-express-one-zone-on-amazon-emr/) and [S3 pricing](https://aws.amazon.com/s3/pricing/). Verify current regional rates when deploying.
 
-Request cost is `(LIST + PUT) × 0.005 / 1000 + (GET + HEAD) × 0.0004 / 1000`. As a scenario, 1,440 completed idle polls per day against the 5,000-object fixture cost `1440 × (6 × 0.005 + 1000 × 0.0004) / 1000 = $0.6192/day` in requests. Ten workers doing that many polls each multiply this by ten. This assumes completed polls, not a guaranteed polling frequency, and excludes application work, transfer, free-tier credits and other services. The fixture occupied 6,396,000 bytes; using 1 GB = 2^30 bytes, a month of storage is `6396000 / 1073741824 × 0.023`, about $0.00014. Polling can dominate storage costs.
+Request cost is `(LIST + PUT) × 0.005 / 1000 + (GET + HEAD) × 0.0004 / 1000`. Using the historical 0.5 request counts as a scenario, 1,440 completed idle polls per day against the 5,000-object fixture cost `1440 × (6 × 0.005 + 1000 × 0.0004) / 1000 = $0.6192/day` in requests. Ten workers doing that many polls each multiply this by ten. This assumes completed polls, not a guaranteed polling frequency, and excludes application work, transfer, free-tier credits and other services. The fixture occupied 6,396,000 bytes; using 1 GB = 2^30 bytes, a month of storage is `6396000 / 1073741824 × 0.023`, about $0.00014. Polling can dominate storage costs.
 
 Run the opt-in probe with the test Python environment after a build:
 
@@ -250,11 +252,26 @@ Direct AWS measurements from this macOS ARM64 host to us-east-1, with the unchan
 | 100 completed tasks, no checkpoints | 3 / 3 | 7,282 ms |
 | 1,000 completed tasks, four checkpoints each | 0 / 3 | Timed out at about ten seconds |
 
-These observed timings include this host's network round trips; they are not universal task-count limits or measurements of an AWS-hosted deployment. Sequential state reads make accumulated terminal tasks a practical limit. This alpha suits small namespaces; sustained growth needs improved discovery. There is no automatic pruning or separate index. Increasing the client timeout does not remove the linear request cost. Measure your deployment before relying on a polling cadence.
+These historical timings include this host's network round trips; they are not universal task-count limits or measurements of an AWS-hosted deployment. The current hints reduce repeated state reads, but cold scans, missing LIST tokens, and entries beyond the hint capacity still require reads. Every poll still enumerates objects, so accumulated history remains a practical limit. There is no automatic pruning or separate index. Increasing the client timeout does not remove enumeration or cold-read costs. Measure your deployment before relying on a polling cadence.
 
-Separate local macOS ARM64/RustFS direct load runs recorded 800/800 webhook completions across eight cases and 451/600 ingestion completions across six cases; 149 ingestion workflows remained pending at the observation cutoff. One-worker retained ingestion bursts were skipped after the fresh burst timed out. These runs and the cloud runs differ in host, build, instrumentation and observation window, so their totals do not establish a capacity ratio.
+Before these discovery changes, local macOS ARM64/RustFS direct load runs recorded 800/800 webhook completions across eight cases and 451/600 ingestion completions across six cases; 149 ingestion workflows remained pending at the observation cutoff. One-worker retained ingestion bursts were skipped after the fresh burst timed out. These runs and the cloud runs differ in host, build, instrumentation and observation window, so their totals do not establish a capacity ratio.
 
-A bounded EC2/S3 workflow load run recorded 562 completions from 1,250 submitted workflows across 16 reports. All eight ingestion cases recorded zero completions within their 30–60-second windows. Local probes show that parent-first claiming and repeated state scans can delay child work; they do not establish the exact cloud cause or a throughput guarantee. Keep task counts per prefix small and measure your intended workload.
+Before these discovery changes, a bounded EC2/S3 workflow load run recorded 562 completions from 1,250 submitted workflows across 16 reports. All eight ingestion cases recorded zero completions within their 30–60-second windows. Local probes show that parent-first claiming and repeated state scans can delay child work; they do not establish the exact cloud cause or a throughput guarantee. Keep task counts per prefix small and measure your intended workload.
+
+The discovery changes were compared with frozen baseline `1737fbe` on macOS ARM64 and local RustFS on October 3, 2026. The baseline server binary SHA-256 starts with `7d0ea226`; the candidate starts with `4bb1c6a1`. Both used the same load harness, 100-import bursts, a 60-second observation window and direct storage access. One worker used Python; four workers mixed Python and TypeScript. Retained bursts reused the completed first burst's task and checkpoint history. One-worker retained bursts were skipped in both builds because fresh bursts remained unfinished.
+
+| Import condition | Baseline completed / 100 | Candidate completed / 100 |
+| --- | ---: | ---: |
+| Embedded, one worker, fresh | 39 | 84 |
+| Server, one worker, fresh | 41 | 84 |
+| Embedded, four workers, fresh | 100 | 100 |
+| Server, four workers, fresh | 100 | 100 |
+| Embedded, four workers, retained history | 81 | 100 |
+| Server, four workers, retained history | 83 | 100 |
+
+The candidate completed 568/600 imports; 32 remained pending or unobserved, with no recorded failures or worker/inspection errors. Four-worker fresh bursts finished in 20.89/24.70 seconds versus 29.15/29.67 for the baseline; retained bursts finished in 54.39/57.51 seconds. Both builds completed all 800 webhook workflows. Seven webhook elapsed-time cells improved; the fresh one-worker server cell was slightly slower, 7.673 versus 7.633 seconds. These are bounded local observations, including startup, admission and polling, rather than capacity guarantees.
+
+Repeated counted idle probes showed 1,000 terminal-state GETs becoming zero on warm claims in both modes, while six LIST requests remained for the 5,000-object fixture. Cold timings were mixed. All six missing-LIST-token samples still fetched 100 states, confirming fallback rather than hiding work. The separate counted workload run encountered forwarding errors, including local `EADDRNOTAVAIL`; its results are retained as diagnostics and do not establish clean per-workflow request costs. Cloud comparisons for these changes remain unverified.
 
 ## Code evolution
 

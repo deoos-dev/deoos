@@ -129,13 +129,35 @@ try:
       c.request('/tasks/'+t['id']+'/definitions/'+action[6:],dict(token=t['token'],operation_id=uuid.uuid4().hex,value={'kind':'step','revision':'1'}))
      return c.request('/tasks/'+t['id']+'/'+action,dict(token=t['token'],operation_id=uuid.uuid4().hex,value=value))
     mutate(a,winners[0],'complete',True);passed.append('concurrent submit and claim: one winner')
-    a.submit('stale','raw',{});old=claim(a);time.sleep(6.3);new=claim(b);assert new['generation']==old['generation']+1
+    a.submit('stale','raw',{});old=claim(a);assert claim(b) is None
+    time.sleep(3.1);mutate(a,old,'renew');renewed=a.inspect('stale');time.sleep(3.2);new=claim(b)
+    if new is None:
+     time.sleep(max(0,(renewed['expires_at']-int(time.time()*1000))/1000)+.1);new=claim(b)
+    assert new['generation']==old['generation']+1
+    assert [event for event in new['history'] if event['event']=='claim'][-1]['at_ms']>=renewed['expires_at']
     for action in ['renew','steps/late','complete','fail']:
      try:mutate(a,old,action)
      except EngineError as e:assert e.status==409
      except urllib.error.HTTPError as e:assert e.code==409
      else:raise AssertionError('stale write accepted')
     mutate(b,new,'complete',True);passed.append('stale owner rejected for every mutation')
+    # Warm discovery hints must observe another client's changes and wrap to new IDs.
+    def hint_claim(client):return client.request('/claim',dict(worker=uuid.uuid4().hex,handlers=['discovery-hints']))['task']
+    a.submit('hint-failed','discovery-hints',{},max_attempts=1)
+    hint=hint_claim(a);mutate(a,hint,'fail','test terminal retry')
+    assert hint_claim(b) is None and hint_claim(b) is None
+    terminal=a.request('/tasks/hint-failed');a.retry('hint-failed',terminal['revision'])
+    hint=hint_claim(b);assert hint['id']=='hint-failed';mutate(b,hint,'complete',True)
+    a.submit('hint-cancelled','discovery-hints',{});a.cancel('hint-cancelled');assert hint_claim(b) is None
+    terminal=a.request('/tasks/hint-cancelled');a.retry('hint-cancelled',terminal['revision'])
+    hint=hint_claim(b);assert hint['id']=='hint-cancelled';mutate(b,hint,'complete',True)
+    a.submit('hint-handler','other-discovery-handler',{});assert hint_claim(b) is None
+    hint=b.request('/claim',dict(worker=uuid.uuid4().hex,handlers=['other-discovery-handler']))['task']
+    assert hint['id']=='hint-handler';mutate(b,hint,'complete',True)
+    a.submit('zz-hint','discovery-hints',{});hint=hint_claim(b);assert hint['id']=='zz-hint';mutate(b,hint,'complete',True)
+    a.submit('aa-hint','discovery-hints',{});hint=hint_claim(b);assert hint['id']=='aa-hint';mutate(b,hint,'complete',True)
+    assert hint_claim(b) is None
+    passed.append('warm discovery observes external failed/cancelled retries, changed handlers and newly inserted IDs behind cursor')
     a.submit('000-retry','raw',{},retry_ms=3000);t=claim(a);mutate(a,t,'steps/saved',42);mutate(a,t,'fail','transient');assert claim(b) is None;time.sleep(3.1);t=claim(b);assert 'saved' in t['steps'];mutate(b,t,'complete',True);passed.append('retry backoff and persisted checkpoint')
     trace=pathlib.Path(scratch)/'trace';ready=pathlib.Path(scratch)/'ready'
     a.submit('recovery','work',dict(trace=str(trace),ready=str(ready),number=20,pause=120),max_attempts=5)
@@ -552,7 +574,7 @@ else:raise AssertionError('worker did not fail')
       try:urllib.request.urlopen(os.environ['ENGINE_URL']+'/health',timeout=1);break
       except OSError:time.sleep(.1)
      else:raise AssertionError('schedule server unavailable')
-    a=create();child_env=dict(os.environ)
+    a,b=create(),create();child_env=dict(os.environ)
     if mode=='server':child_env={k:v for k,v in child_env.items() if not k.startswith('AWS_') and k not in ['EXECUTION_PREFIX','DEOOS_NATIVE_LIBRARY','DEOOS_NODE_LIBRARY']}
     env=dict(child_env,PYTHONPATH=str(ROOT/'clients/python'))
     script=node_header+"const first=await c.schedule('node-control','node-control.v1',{},86400000);await new Promise(r=>setTimeout(r,10));const replay=await c.schedule('node-control','node-control.v1',{},86400000);if(replay.first_due_ms!==first.first_due_ms)throw new Error('default anchor changed');if(!(await c.pauseSchedule('node-control')).paused)throw new Error('pause failed');if((await c.resumeSchedule('node-control')).paused)throw new Error('resume failed');const job=await c.backfill('node-control',first.first_due_ms,first.first_due_ms+1,1);if(job.backfill.remaining!==1)throw new Error('backfill failed');await c.pauseSchedule('node-control');const state=await c.inspectSchedule('node-control');if(!state.paused||state.backfill.remaining!==1)throw new Error('inspect failed');"
@@ -575,6 +597,28 @@ c.close()
      return subprocess.run(command,cwd=ROOT,env=dict(env,HANDLER=handler,TRACE=str(schedule_trace)),check=True,capture_output=True,text=True,timeout=60)
     def trace_for(identifier):
      return [record['scheduled_at'] for record in (map(json.loads,schedule_trace.read_text().splitlines()) if schedule_trace.exists() else []) if record['id']==identifier]
+    # Dormant schedule hints must react to time and writes from an independent client.
+    def schedule_hint_claim(handler):return b.request('/claim',{'worker':'schedule-hint','handlers':[handler]})['task']
+    anchor=int(time.time()*1000)+2000
+    a.schedule('hint-due','schedule-hint-due.v1',{},86400000,first_due_ms=anchor)
+    assert schedule_hint_claim('schedule-hint-due.v1') is None
+    time.sleep(max(0,(anchor-int(time.time()*1000))/1000)+.05)
+    hint=schedule_hint_claim('schedule-hint-due.v1');assert hint['schedule']['scheduled_at']==anchor
+    mutate(b,hint,'complete',True);a.pause_schedule('hint-due')
+    anchor=int(time.time()*1000)-1000
+    a.schedule('hint-paused','schedule-hint-paused.v1',{},86400000,first_due_ms=anchor);a.pause_schedule('hint-paused')
+    assert schedule_hint_claim('schedule-hint-paused.v1') is None
+    a.resume_schedule('hint-paused');hint=schedule_hint_claim('schedule-hint-paused.v1')
+    assert hint['schedule']['scheduled_at']==anchor;mutate(b,hint,'complete',True);a.pause_schedule('hint-paused')
+    anchor=int(time.time()*1000)-1000
+    a.schedule('hint-backfill','schedule-hint-backfill.v1',{},86400000,first_due_ms=anchor)
+    hint=schedule_hint_claim('schedule-hint-backfill.v1');mutate(b,hint,'complete',True)
+    assert schedule_hint_claim('schedule-hint-backfill.v1') is None
+    # The cadence is future, but an external historical job still needs processing.
+    a.backfill('hint-backfill',anchor,anchor+1,limit=1)
+    assert schedule_hint_claim('schedule-hint-backfill.v1') is None
+    assert a.inspect_schedule('hint-backfill')['backfill'] is None;a.pause_schedule('hint-backfill')
+    passed.append('warm schedule hints observe deadlines without writes and external resume/backfill')
     anchor=int(time.time()*1000)-5000
     a.schedule('latest','scheduled-latest.v1',{'number':5.0},1000,first_due_ms=anchor,overlap='allow')
     a.schedule('latest','scheduled-latest.v1',{'number':5},1000,first_due_ms=anchor,overlap='allow')
@@ -722,6 +766,7 @@ c.close()
        child.kill();child.wait()
        if fault_server:fault_server.kill();fault_server.wait()
        proxy.release.set()
+       a.pause_schedule(identifier)
        # A fresh main engine completes the durable intent after the emitter process is gone.
        recovered=a.request('/claim',{'worker':'fresh-recovery','handlers':[handler]})['task']
        assert recovered['id']==pending['task_id'] and recovered['attempts']==1 and recovered['schedule']=={'id':identifier,'scheduled_at':anchor}

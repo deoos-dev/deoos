@@ -19,6 +19,7 @@ use std::{
 };
 use uuid::Uuid;
 const PROTOCOL_VERSION: u32 = 3;
+mod discovery;
 mod qualification;
 
 #[derive(Clone)]
@@ -26,6 +27,7 @@ pub struct Engine {
     store: Arc<dyn ObjectStore>,
     prefix: String,
     lease_ms: u64,
+    discovery: Arc<std::sync::Mutex<discovery::Hints>>,
 }
 #[derive(Clone, Serialize, Deserialize, Debug)]
 struct Task {
@@ -265,12 +267,16 @@ impl Engine {
             )
             .await
         {
-            Ok(_) => Ok(()),
+            Ok(_) => {
+                self.discovery.lock().unwrap().prioritize(t);
+                Ok(())
+            }
             Err(err) => {
                 // Reconcile an uncertain response. A revision is unique to this exact proposed write.
                 if let Ok((actual, _)) = self.read(&t.id).await
                     && actual.revision == t.revision
                 {
+                    self.discovery.lock().unwrap().prioritize(&actual);
                     return Ok(());
                 }
                 Err(storage(err))
@@ -828,6 +834,7 @@ async fn claim(State(e): State<Engine>, Json(c): Json<Claim>) -> ApiResult<Value
         .try_collect()
         .await
         .map_err(storage)?;
+    let mut candidates = Vec::new();
     for obj in objects {
         let key = obj.location.to_string();
         let Some(id) = key
@@ -837,7 +844,39 @@ async fn claim(State(e): State<Engine>, Json(c): Json<Claim>) -> ApiResult<Value
         else {
             continue;
         };
-        let (mut t, v) = e.read(id).await?;
+        candidates.push((id.to_owned(), obj));
+    }
+    candidates.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+    let present: std::collections::HashSet<&str> =
+        candidates.iter().map(|(id, _)| id.as_str()).collect();
+    let start = e.discovery.lock().unwrap().start(&candidates, &present);
+    let priority_id = e.discovery.lock().unwrap().take_priority();
+    let priority = priority_id
+        .as_ref()
+        .and_then(|id| candidates.iter().find(|(candidate, _)| candidate == id));
+    let normal = candidates[start..]
+        .iter()
+        .chain(candidates[..start].iter())
+        .filter(|(id, _)| priority_id.as_ref() != Some(id));
+    for (id, obj, prioritized) in priority
+        .into_iter()
+        .map(|(id, obj)| (id, obj, true))
+        .chain(normal.map(|(id, obj)| (id, obj, false)))
+    {
+        if !prioritized
+            && e.discovery
+                .lock()
+                .unwrap()
+                .skip(id, obj, &c.handlers, now())
+        {
+            continue;
+        }
+        let (mut t, v) = match e.read(id).await {
+            Ok(value) => value,
+            Err((StatusCode::NOT_FOUND, _)) => continue,
+            Err(error) => return Err(error),
+        };
+        e.discovery.lock().unwrap().remember(&t, &v);
         if !c.handlers.contains(&t.handler) || t.available_at > now() {
             continue;
         }
@@ -847,6 +886,7 @@ async fn claim(State(e): State<Engine>, Json(c): Json<Claim>) -> ApiResult<Value
                 continue;
             };
             if !e.ready(&t, condition).await? {
+                e.discovery.lock().unwrap().prioritize(&t);
                 continue;
             }
         } else if t.status != "queued" && !(t.status == "running" && t.expires_at <= now()) {
@@ -1004,6 +1044,7 @@ impl Engine {
             store,
             prefix,
             lease_ms,
+            discovery: Arc::new(std::sync::Mutex::new(discovery::Hints::default())),
         })
     }
     pub fn from_env() -> Result<Self, String> {

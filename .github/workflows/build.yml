@@ -83,6 +83,7 @@ jobs:
           PYTHON
           python tests/two_modes.py rustfs
           python tests/use_cases.py
+          python tests/discovery_contract.py
       - name: Capture RustFS logs and remove its volume
         if: always()
         run: |
