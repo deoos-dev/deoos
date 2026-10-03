@@ -141,6 +141,51 @@ try:
      except urllib.error.HTTPError as e:assert e.code==409
      else:raise AssertionError('stale write accepted')
     mutate(b,new,'complete',True);passed.append('stale owner rejected for every mutation')
+    # Exported Context has no heartbeat: replacement detection must happen at its checkpoint boundary.
+    for language in ['python','typescript']:
+     task_id='stale-context-'+language;effect=pathlib.Path(scratch)/(task_id+'-effect')
+     a.submit(task_id,task_id,{})
+     old=a.request('/claim',dict(worker='old-context',handlers=[task_id]))['task']
+     time.sleep(max(0,(old['expires_at']-int(time.time()*1000))/1000)+.05)
+     replacement=b.request('/claim',dict(worker='replacement-context',handlers=[task_id]))['task']
+     assert replacement['id']==task_id and replacement['generation']==old['generation']+1 and replacement['token']!=old['token']
+     assert [entry for entry in replacement['history'] if entry['event']=='claim'][-1]['at_ms']>=old['expires_at']
+     replacement=mutate(b,replacement,'renew')
+     python_stale="""import json,os,pathlib;from deoos import Client,Context,EngineError
+c=Client(bucket=os.environ['AWS_BUCKET']) if os.environ['WORKER_MODE']=='library' else Client.remote(os.environ['ENGINE_URL'],os.environ['ENGINE_TOKEN'])
+ctx=Context(c,json.loads(os.environ['OLD_TASK']))
+def effect():pathlib.Path(os.environ['EFFECT']).touch()
+try:ctx.step('first',effect)
+except EngineError as error:assert error.status==409
+else:raise AssertionError('stale checkpoint accepted')
+for operation in [lambda:ctx.step('second',effect),lambda:ctx.spawn('late-child','noop',{})]:
+ try:operation()
+ except EngineError:raise AssertionError('ownership loss was not latched locally')
+ except RuntimeError:pass
+ else:raise AssertionError('stale context continued')
+c.close()
+"""
+     node_stale="""import {Client,Context,EngineError} from './clients/typescript/dist/index.js';
+import {writeFileSync} from 'node:fs';
+const c=process.env.WORKER_MODE==='library'?new Client({bucket:process.env.AWS_BUCKET,prefix:process.env.EXECUTION_PREFIX}):Client.remote(process.env.ENGINE_URL,process.env.ENGINE_TOKEN);
+const ctx=new Context(c,JSON.parse(process.env.OLD_TASK));const effect=()=>writeFileSync(process.env.EFFECT,'executed');
+try{await ctx.step('first',effect);throw new Error('stale checkpoint accepted');}
+catch(error){if(!(error instanceof EngineError)||error.status!==409)throw error;}
+for(const operation of [()=>ctx.step('second',effect),()=>ctx.spawn('late-child','noop',{})]){
+ let rejected=false;
+ try{await operation();}catch(error){if(!(error instanceof Error)||error instanceof EngineError)throw error;rejected=true;}
+ if(!rejected)throw new Error('stale context continued');
+}
+"""
+     command=[sys.executable,'-c',python_stale] if language=='python' else ['node','--input-type=module','-e',node_stale]
+     subprocess.run(command,cwd=ROOT,env=dict(child_env,PYTHONPATH=str(ROOT/'clients/python'),OLD_TASK=json.dumps(old),EFFECT=str(effect)),check=True,capture_output=True,text=True,timeout=30)
+     assert not effect.exists()
+     child_id='child-'+hashlib.sha256((task_id+'/late-child').encode()).hexdigest()[:32]
+     expect_status(404,lambda:a.inspect(child_id))
+     state=a.inspect(task_id);assert state['status']=='running' and state['token']==replacement['token'] and state['expires_at']>int(time.time()*1000) and not state['steps'] and not state['definitions']
+     mutate(b,replacement,'complete',True)
+     assert a.inspect(task_id)['status']=='completed'
+    passed.append('both SDKs latch replacement ownership loss without heartbeat; caught stale checkpoints cannot start further effects or children')
     # Warm discovery hints must observe another client's changes and wrap to new IDs.
     def hint_claim(client):return client.request('/claim',dict(worker=uuid.uuid4().hex,handlers=['discovery-hints']))['task']
     a.submit('hint-failed','discovery-hints',{},max_attempts=1)

@@ -158,8 +158,10 @@ export class Context {
   }
   private async checkpoint<T>(name:string,definition:unknown,fn:()=>T|Promise<T>):Promise<T> {
     validStep(name);
-    await this.currentState();
-    const state=await this.mutate(`definitions/${name}`,definition);
+    this.checkOwner();
+    let state;
+    try{state=await this.mutate(`definitions/${name}`,definition);}
+    catch(error){if(error instanceof EngineError&&error.status===409)await this.currentState();throw error;}
     if(Object.hasOwn(state.steps,name)) return this.client.request(`/tasks/${this.task.id}/steps/${name}`);
     const result=await fn();this.checkOwner();await this.mutate(`steps/${name}`,result);return result;
   }

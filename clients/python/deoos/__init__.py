@@ -247,8 +247,13 @@ class Context:
     def _checkpoint(self, name, definition, function):
         _valid_step(name)
         _valid_step(definition["revision"])
-        self.current_state()
-        state = self.mutate("definitions/" + name, definition)
+        self.check_owner()
+        try:
+            state = self.mutate("definitions/" + name, definition)
+        except EngineError as error:
+            if error.status == 409:
+                self.current_state()
+            raise
         if name in state["steps"]:
             return self.client.request(f'/tasks/{self.task["id"]}/steps/{name}')
         result = function()
