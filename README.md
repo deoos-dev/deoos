@@ -273,6 +273,8 @@ The candidate completed 568/600 imports; 32 remained pending or unobserved, with
 
 Repeated counted idle probes showed 1,000 terminal-state GETs becoming zero on warm claims in both modes, while six LIST requests remained for the 5,000-object fixture. Cold timings were mixed. All six missing-LIST-token samples still fetched 100 states, confirming fallback rather than hiding work. The separate counted workload run encountered forwarding errors, including local `EADDRNOTAVAIL`; its results are retained as diagnostics and do not establish clean per-workflow request costs. Cloud comparisons for these changes remain unverified.
 
+A later paired import run used the same bounded connection-reuse counter on both builds. Across 600 admitted imports per build, observed GET attempts fell from 500,062 to 44,124; LIST attempts rose from 4,599 to 5,305 and PUT attempts from 15,058 to 16,506. Completions rose from 395 to 558, with 205 versus 42 pending at the cutoff and no recorded workflow failures or worker/inspection errors. Each build recorded one upstream disconnect; the baseline recorded four downstream reply errors and the candidate eight. These aggregate counts include admission, polling, inspection and contention across fresh and retained namespaces. They are attempted requests, not proof of delivered responses or clean per-workflow costs; use the direct-access runs above for the timing comparison.
+
 ## Code evolution
 
 Use handler names such as `process_order.v1` and `process_order.v2`. A task's handler is immutable. Register both versions while old executions finish; submit new work to the new version. A worker registering only `.v2` cannot claim `.v1` tasks.
