@@ -233,6 +233,8 @@ A local macOS ARM64/RustFS embedded-mode probe on October 3, 2026 seeded complet
 
 Normal task discovery rotates through IDs. A waiting parent can place its children and itself in a volatile priority queue capped at 1,024 IDs. After three priority reservations, the next claim starts with normal discovery. This gives unrelated work opportunities within that engine; it does not guarantee global ordering or a completion deadline. The queue adds no durable objects or external services.
 
+Shared-server HTTP requests use a ten-second socket timeout in Python and a ten-second request deadline in TypeScript. Embedded calls have no equivalent SDK deadline, so a successful long embedded scan does not establish shared-server coverage. A timed-out claim has an uncertain outcome: storage may have accepted ownership before the response was lost. That claim can hold a lease and spend an attempt without running its handler; recovery waits for lease expiry. A client disconnect does not guarantee rollback of a storage write already sent. Keep prefixes bounded and measure cold-start behavior as well as warm polling.
+
 Measured on macOS ARM64 with the 0.5 engine and local RustFS, three samples per row gave identical request counts in library and shared-server claim tests:
 
 | Idle namespace | LIST per completed claim | GET per completed claim |
