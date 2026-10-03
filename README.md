@@ -252,6 +252,8 @@ Direct AWS measurements from this macOS ARM64 host to us-east-1, with the unchan
 
 These observed timings include this host's network round trips; they are not universal task-count limits or measurements of an AWS-hosted deployment. Sequential state reads make accumulated terminal tasks a practical limit. This alpha suits small namespaces; sustained growth needs improved discovery. There is no automatic pruning or separate index. Increasing the client timeout does not remove the linear request cost. Measure your deployment before relying on a polling cadence.
 
+A bounded EC2/S3 workflow load run recorded 562 completions from 1,250 submitted workflows across 16 reports. All eight ingestion cases recorded zero completions within their 30–60-second windows. Local probes show that parent-first claiming and repeated state scans can delay child work; they do not establish the exact cloud cause or a throughput guarantee. Keep task counts per prefix small and measure your intended workload.
+
 ## Code evolution
 
 Use handler names such as `process_order.v1` and `process_order.v2`. A task's handler is immutable. Register both versions while old executions finish; submit new work to the new version. A worker registering only `.v2` cannot claim `.v1` tasks.
