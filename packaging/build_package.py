@@ -161,7 +161,12 @@ def stage_native_artifacts(label: str, suffix: str, explicit_target: bool) -> No
         if not source.is_file():
             raise SystemExit(f"Expected native artifact was not built: {source}")
         destination.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(source, destination)
+        # Replace the inode rather than overwriting a library mapped by a live worker.
+        # In-place writes can invalidate macOS code-signature pages in both old and new clients.
+        with tempfile.TemporaryDirectory(dir=destination.parent) as directory:
+            staged = pathlib.Path(directory) / destination.name
+            shutil.copy2(source, staged)
+            os.replace(staged, destination)
 
 def build(label: str | None = None) -> tuple[str, str, str, str]:
     explicit_target = label is not None

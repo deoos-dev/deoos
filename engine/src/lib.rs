@@ -19,6 +19,7 @@ use std::{
 };
 use uuid::Uuid;
 const PROTOCOL_VERSION: u32 = 3;
+mod active;
 mod discovery;
 mod qualification;
 
@@ -28,6 +29,7 @@ pub struct Engine {
     prefix: String,
     lease_ms: u64,
     discovery: Arc<std::sync::Mutex<discovery::Hints>>,
+    active_ready: Arc<tokio::sync::Mutex<bool>>,
 }
 #[derive(Clone, Serialize, Deserialize, Debug)]
 struct Task {
@@ -67,6 +69,8 @@ struct Task {
     last_retry_operation: Option<String>,
     #[serde(default)]
     last_retry_fingerprint: Option<String>,
+    #[serde(default)]
+    active_incarnation: Option<String>,
     #[serde(default, flatten)]
     extra: BTreeMap<String, Value>,
 }
@@ -248,9 +252,7 @@ impl Engine {
                 "invalid stored task".into(),
             )
         })?;
-        if t.version != PROTOCOL_VERSION {
-            return Err(conflict("unsupported stored protocol version"));
-        }
+        t.validate(id)?;
         Ok((t, v))
     }
     async fn write(&self, t: &Task, mode: PutMode) -> Result<(), (StatusCode, String)> {
@@ -268,7 +270,7 @@ impl Engine {
             .await
         {
             Ok(_) => {
-                self.discovery.lock().unwrap().prioritize(t);
+                self.after_state_write(t).await;
                 Ok(())
             }
             Err(err) => {
@@ -276,7 +278,7 @@ impl Engine {
                 if let Ok((actual, _)) = self.read(&t.id).await
                     && actual.revision == t.revision
                 {
-                    self.discovery.lock().unwrap().prioritize(&actual);
+                    self.after_state_write(&actual).await;
                     return Ok(());
                 }
                 Err(storage(err))
@@ -357,6 +359,9 @@ impl Engine {
             task.last_retry_fingerprint = Some(fingerprint.clone());
             task.record("retry", None);
             task.revision = Uuid::new_v4().to_string();
+            task.active_incarnation = Some(Uuid::new_v4().to_string());
+            self.publish_active(&task, Some(request.expected_revision.clone()))
+                .await?;
             match self.write(&task, PutMode::Update(version)).await {
                 Ok(()) => return Ok(Json(task)),
                 Err(error) => {
@@ -801,55 +806,44 @@ async fn submit(State(e): State<Engine>, Json(s): Json<Submit>) -> ApiResult<Tas
         history: Vec::new(),
         last_retry_operation: None,
         last_retry_fingerprint: None,
+        active_incarnation: Some(Uuid::new_v4().to_string()),
         extra: BTreeMap::new(),
     };
     t.record("submit", None);
+    match e.read(&t.id).await {
+        Ok((existing, _)) => return submitted_existing(existing, &t),
+        Err((StatusCode::NOT_FOUND, _)) => {}
+        Err(error) => return Err(error),
+    }
+    e.publish_active(&t, None).await?;
     match e.write(&t, PutMode::Create).await {
         Ok(()) => Ok(Json(t)),
         Err((StatusCode::CONFLICT, _)) => {
             let (existing, _) = e.read(&t.id).await?;
-            if existing.handler != t.handler
-                || normalized_json(existing.inputs.clone()) != normalized_json(t.inputs.clone())
-                || existing.max_attempts != t.max_attempts
-                || existing.retry_ms != t.retry_ms
-                || existing.schedule != t.schedule
-            {
-                return Err(conflict("task ID already used with different definition"));
-            }
-            Ok(Json(existing))
+            submitted_existing(existing, &t)
         }
         Err(err) => Err(err),
     }
+}
+fn submitted_existing(existing: Task, submitted: &Task) -> ApiResult<Task> {
+    if existing.handler != submitted.handler
+        || normalized_json(existing.inputs.clone()) != normalized_json(submitted.inputs.clone())
+        || existing.max_attempts != submitted.max_attempts
+        || existing.retry_ms != submitted.retry_ms
+        || existing.schedule != submitted.schedule
+    {
+        return Err(conflict("task ID already used with different definition"));
+    }
+    Ok(Json(existing))
 }
 async fn claim(State(e): State<Engine>, Json(c): Json<Claim>) -> ApiResult<Value> {
     if c.worker.is_empty() || c.handlers.is_empty() {
         return Err(bad("worker and handlers required"));
     }
+    e.ensure_active().await?;
     schedules::tick(&e, &c.handlers).await?;
-    let prefix = Key::from(format!("{}/tasks", e.prefix));
-    let task_prefix = format!("{prefix}/");
-    let objects: Vec<_> = e
-        .store
-        .list(Some(&prefix))
-        .try_collect()
-        .await
-        .map_err(storage)?;
-    let mut candidates = Vec::new();
-    for obj in objects {
-        let key = obj.location.to_string();
-        let Some(id) = key
-            .strip_prefix(&task_prefix)
-            .and_then(|s| s.strip_suffix("/state.json"))
-            .filter(|s| valid(s))
-        else {
-            continue;
-        };
-        candidates.push((id.to_owned(), obj));
-    }
-    candidates.sort_unstable_by(|a, b| a.0.cmp(&b.0));
-    let present: std::collections::HashSet<&str> =
-        candidates.iter().map(|(id, _)| id.as_str()).collect();
-    let start = e.discovery.lock().unwrap().start(&candidates, &present);
+    let candidates = e.active_candidates().await?;
+    let start = e.discovery.lock().unwrap().start(&candidates);
     let priority_id = e.discovery.lock().unwrap().take_priority();
     let priority = priority_id
         .as_ref()
@@ -863,20 +857,12 @@ async fn claim(State(e): State<Engine>, Json(c): Json<Claim>) -> ApiResult<Value
         .map(|(id, obj)| (id, obj, true))
         .chain(normal.map(|(id, obj)| (id, obj, false)))
     {
-        if !prioritized
-            && e.discovery
-                .lock()
-                .unwrap()
-                .skip(id, obj, &c.handlers, now())
-        {
-            continue;
+        if !prioritized {
+            e.discovery.lock().unwrap().examined(id);
         }
-        let (mut t, v) = match e.read(id).await {
-            Ok(value) => value,
-            Err((StatusCode::NOT_FOUND, _)) => continue,
-            Err(error) => return Err(error),
+        let Some((mut t, v)) = e.resolve_active(&obj.location).await? else {
+            continue;
         };
-        e.discovery.lock().unwrap().remember(&t, &v);
         if !c.handlers.contains(&t.handler) || t.available_at > now() {
             continue;
         }
@@ -1045,6 +1031,7 @@ impl Engine {
             prefix,
             lease_ms,
             discovery: Arc::new(std::sync::Mutex::new(discovery::Hints::default())),
+            active_ready: Arc::new(tokio::sync::Mutex::new(false)),
         })
     }
     pub fn from_env() -> Result<Self, String> {
@@ -1091,6 +1078,9 @@ impl Engine {
             return Ok(
                 json!({"process_id":std::process::id(),"protocol_version":PROTOCOL_VERSION}),
             );
+        }
+        if method == "POST" {
+            self.ensure_active().await?;
         }
         let decode = |error: serde_json::Error| bad(&error.to_string());
         if method == "GET" && path == "/tasks" {

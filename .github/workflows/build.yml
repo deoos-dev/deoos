@@ -84,6 +84,7 @@ jobs:
           python tests/two_modes.py rustfs
           python tests/use_cases.py
           python tests/discovery_contract.py
+          python tests/active_discovery_contract.py
       - name: Capture RustFS logs and remove its volume
         if: always()
         run: |
@@ -95,7 +96,9 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: checks-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ env.DEOOS_OUTPUTS_DIR }}/evidence/
+          path: |
+            ${{ env.DEOOS_OUTPUTS_DIR }}/evidence/
+            ${{ env.DEOOS_OUTPUTS_DIR }}/active-discovery/
           if-no-files-found: ignore
           retention-days: 14
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Opt-in local-RustFS behavioral checks for bounded discovery hints.
+"""Opt-in local-RustFS behavioral checks for active discovery and readiness hints.
 
 No AWS backend is available in this script. It creates one uniquely named local
 RustFS bucket, exercises a real native library and a separate engine process,
@@ -13,7 +13,6 @@ import json
 import os
 import pathlib
 import platform
-import re
 import signal
 import socket
 import subprocess
@@ -69,15 +68,22 @@ def stop_group(process):
     return process.poll() is not None
 
 
-def put_state(s3, bucket, prefix, state):
+def put_state(s3, bucket, prefix, state, active=True):
     s3.put_object(Bucket=bucket, Key=f"{prefix}/tasks/{state['id']}/state.json",
                   Body=json.dumps(state, separators=(",", ":")).encode(),
                   ContentType="application/json")
+    if active:
+        marker_task = copy.deepcopy(state)
+        if marker_task["status"] in ("completed", "failed", "cancelled"):
+            marker_task["status"] = "queued"
+        s3.put_object(Bucket=bucket, Key=f"{prefix}/active/{state['id']}/{state['active_incarnation']}.json",
+                      Body=json.dumps({"version": 1, "task": marker_task, "expected_revision": None},
+                                      separators=(",", ":")).encode(), ContentType="application/json")
 
 
 def clone_state(template, identifier, status):
     state = copy.deepcopy(template)
-    state.update(id=identifier, revision=uuid.uuid4().hex, status=status)
+    state.update(id=identifier, revision=uuid.uuid4().hex, status=status, active_incarnation=str(uuid.uuid4()))
     if status == "queued":
         state.update(attempts=0, available_at=0, expires_at=0, owner=None, token=None,
                      error=None, waiting_on=None, history=[])
@@ -99,13 +105,9 @@ def main():
     parser.add_argument("--engine", type=pathlib.Path,
                         help="engine server binary; defaults to this runtime tree's release binary")
     args = parser.parse_args()
-    hint_capacity = 16_384
+    history_count = 1_000
 
     repo = args.repo.resolve()
-    discovery_source = (repo / "engine/src/discovery.rs").read_text()
-    capacity = re.search(r"const MAX_HINTS: usize = ([\d_]+);", discovery_source)
-    if capacity is None or int(capacity.group(1).replace("_", "")) != hint_capacity:
-        raise RuntimeError("requested seed count does not match this engine's hint capacity")
     sys.path.insert(0, str(repo / "tests"))
     sys.path.insert(0, str(repo / "clients/python"))
     from deoos import Client
@@ -124,12 +126,12 @@ def main():
     bucket = "deoos-discovery-contract-" + run_id[:20]
     prefix = "discovery-contract-" + run_id
     neighbor = prefix + "-neighbor/keep"
-    evidence = repo.parent / "outputs/evidence" / f"discovery-contract-{run_id}.json"
+    evidence = repo.parent / "outputs/active-discovery" / f"discovery-contract-{run_id}.json"
     report = {"started": datetime.datetime.now(datetime.timezone.utc).isoformat(),
               "backend": "local-rustfs-only", "bucket": bucket, "owned_prefix": prefix,
-              "cache_capacity": hint_capacity, "checks": [], "cleaned": False,
+              "historical_tasks": history_count, "checks": [], "cleaned": False,
               "servers_stopped": [], "source_hashes": {}, "runtime_hashes": {}}
-    for name in ("engine/src/lib.rs", "engine/src/discovery.rs", "engine/src/schedules.rs",
+    for name in ("engine/src/lib.rs", "engine/src/active.rs", "engine/src/discovery.rs", "engine/src/schedules.rs",
                  "tests/discovery_probe.py", "tests/discovery_contract.py"):
         path = repo / name
         if path.is_file():
@@ -216,13 +218,15 @@ def main():
 
         cap_prefix = prefix + "/cap"
         report["seeded_template_prefix"] = template_prefix
-        report["cap_seed_count"] = hint_capacity
+        report["cap_seed_count"] = history_count
+        s3.put_object(Bucket=bucket, Key=cap_prefix + "/active-index.json",
+                      Body=b'{"version":1,"status":"ready"}')
         start_seed = time.monotonic()
         with ThreadPoolExecutor(max_workers=32) as workers:
             list(workers.map(lambda index: put_state(
                 s3, bucket, cap_prefix,
-                clone_state(terminal_template, f"terminal-{index:05d}", "completed")),
-                range(hint_capacity)))
+                clone_state(terminal_template, f"terminal-{index:05d}", "completed"), active=False),
+                range(history_count)))
         report["cap_seed_seconds"] = time.monotonic() - start_seed
         cap_client = client_for(cap_prefix)
         proxy.reset()
@@ -231,7 +235,8 @@ def main():
         proxy.drain()
         first_counts = proxy.snapshot()
         first_gets = task_counts(first_counts).get("operations", {}).get("GET", 0)
-        assert first_gets == hint_capacity, (first_gets, hint_capacity)
+        assert first_gets == 0, first_gets
+        assert task_counts(first_counts).get("operations", {}).get("LIST", 0) == 0, first_counts
         proxy.reset()
         no_work = cap_client.request("/claim", {"worker": "cap-hit", "handlers": ["contract.fixture"]})
         assert no_work["task"] is None
@@ -239,8 +244,9 @@ def main():
         warm_counts = proxy.snapshot()
         warm_gets = task_counts(warm_counts).get("operations", {}).get("GET", 0)
         assert warm_gets == 0, warm_gets
-        report["checks"].append({"name": "full negative-hint cache reaches 16384 and skips matching terminal GETs",
-                                 "seeded": hint_capacity, "warm_gets": first_gets,
+        assert task_counts(warm_counts).get("operations", {}).get("LIST", 0) == 0, warm_counts
+        report["checks"].append({"name": "cold and warm claims skip all historical terminal objects",
+                                 "seeded": history_count, "cold_gets": first_gets,
                                  "repeat_gets": warm_gets,
                                  "first_requests": first_counts["request_families"],
                                  "repeat_requests": warm_counts["request_families"]})
@@ -252,20 +258,23 @@ def main():
         proxy.drain()
         cap_claim_counts = proxy.snapshot()
         assert task_counts(cap_claim_counts).get("operations", {}).get("GET", 0) == 1
-        report["checks"].append({"name": "eligible ID beyond full hint cap is still read and claimed",
+        report["checks"].append({"name": "active eligible task is read and claimed beside retained history",
                                  "claimed_id": claimed["id"], "task_requests": task_counts(cap_claim_counts)})
         cap_client.close()
         library_clients.remove(cap_client)
 
         # Fresh engine and uncached victim make the LIST->GET disappearance deterministic.
         delete_prefix = prefix + "/delete-race"
-        put_state(s3, bucket, delete_prefix, clone_state(terminal_template, "a-victim", "completed"))
+        s3.put_object(Bucket=bucket, Key=delete_prefix + "/active-index.json",
+                      Body=b'{"version":1,"status":"ready"}')
+        victim = clone_state(terminal_template, "a-victim", "completed")
+        put_state(s3, bucket, delete_prefix, victim)
         put_state(s3, bucket, delete_prefix, clone_state(queued_template, "b-eligible", "queued"))
         put_state(s3, bucket, delete_prefix, clone_state(terminal_template, "z-terminal", "completed"))
         deleted = {"done": False}
-        victim_key = f"{delete_prefix}/tasks/a-victim/state.json"
+        victim_key = f"{delete_prefix}/active/a-victim/{victim['active_incarnation']}.json"
         def delete_after_task_list(family):
-            if family == "tasks" and not deleted["done"]:
+            if family == "active" and not deleted["done"]:
                 s3.delete_object(Bucket=bucket, Key=victim_key)
                 deleted["done"] = True
         proxy.after_list = delete_after_task_list
@@ -275,12 +284,11 @@ def main():
         proxy.after_list = None
         proxy.drain()
         delete_counts = proxy.snapshot()
-        task_statuses = task_counts(delete_counts).get("statuses", {})
         assert deleted["done"] and result and result["id"] == "b-eligible", result
         assert task_counts(delete_counts).get("operations", {}).get("GET", 0) == 2
-        assert task_statuses.get("404") == 1, task_statuses
-        report["checks"].append({"name": "deleted LIST candidate returns 404 and scan continues to queued task",
-                                 "victim_get_404": task_statuses.get("404"),
+        assert s3.get_object(Bucket=bucket, Key=f"{delete_prefix}/tasks/a-victim/state.json")["Body"].read()
+        report["checks"].append({"name": "deleted active LIST candidate with retained terminal state safely skips to queued task",
+                                 "victim_execution_state_preserved": True,
                                  "claimed_id": result["id"], "task_requests": task_counts(delete_counts)})
         delete_client.close()
         library_clients.remove(delete_client)

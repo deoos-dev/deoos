@@ -9,6 +9,7 @@ load/<run UUID>/ namespace and never creates or deletes that bucket.
 """
 import argparse
 import collections
+import copy
 import datetime
 import hashlib
 import json
@@ -34,6 +35,30 @@ from use_cases import IntegrationFixture, stop, wait
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "clients/python"))
 from deoos import Client
+
+
+def seed_completed_history(s3, bucket, prefix, client, count):
+    """Seed terminal state fixtures outside timing; exercise actual completion first."""
+    if not count:
+        # Initialize discovery before timing without creating a task.
+        client.request("/claim", {"worker": "history-bootstrap", "handlers": ["load-history"]})
+        return
+    identifier = "history-template"
+    client.submit(identifier, "load-history", {})
+    assert client.run_once({"load-history": lambda ctx, inputs: {"history": True}})
+    template = client.inspect(identifier)
+    assert template["status"] == "completed"
+    assert not template["steps"] and not template["signals"] and not template["definitions"]
+    from concurrent.futures import ThreadPoolExecutor
+    def seed(index):
+        state = copy.deepcopy(template)
+        state.update(id=f"history-{index:06d}", revision=uuid.uuid4().hex)
+        if state.get("active_incarnation"):
+            state["active_incarnation"] = str(uuid.uuid4())
+        s3.put_object(Bucket=bucket, Key=f"{prefix}/tasks/{state['id']}/state.json",
+                      Body=json.dumps(state, separators=(",", ":")).encode())
+    with ThreadPoolExecutor(max_workers=16) as pool:
+        list(pool.map(seed, range(count - 1)))
 
 
 class OccupiedBucketError(RuntimeError):
@@ -150,6 +175,7 @@ def bucket_contract_tests():
                                                "--mode", "library", "--workers", "1", "--tasks", "1"]), \
                     patch(__name__ + ".storage", return_value=(store, {}, "us-east-1", None)), \
                     patch(__name__ + ".Client", Driver), \
+                    patch(__name__ + ".seed_completed_history"), \
                     patch(__name__ + ".run_round", side_effect=round_effect), \
                     contextlib.redirect_stdout(capture):
                 try:
@@ -363,7 +389,7 @@ def run_round(client, mode, worker_count, round_number, history, args, env, work
     with fixture.lock:
         effects, requests = len(fixture.effects) - effects_before, len(fixture.requests) - requests_before
     storage_counts = proxy.snapshot() if proxy else None
-    return {"namespace": "fresh" if round_number == 0 else "retained-history",
+    return {"namespace": "fresh" if round_number == 0 and not history else "retained-history",
             "retained_terminal_workflows_before_burst": history, "mode": mode, "workers": worker_count,
             "language": args.language,
             "worker_languages": [args.language if args.language != "mixed" else ("python" if index % 2 == 0 else "typescript") for index in range(worker_count)],
@@ -395,10 +421,14 @@ def main():
     parser.add_argument("--inspect-interval", type=float, default=1)
     parser.add_argument("--language", choices=("mixed", "python", "typescript"), default="mixed")
     parser.add_argument("--workload", choices=("webhook", "import"), default="webhook")
+    parser.add_argument("--history-tasks", type=int, default=0,
+                        help="seed completed state fixtures before each timed namespace (0-20000)")
     parser.add_argument("--bucket", help="precreated empty target; preserve bucket and clean only this run prefix")
     parser.add_argument("--check-bucket-contract", dest="self_test_bucket_contract",
                         action="store_true", help="run local RustFS ownership/cleanup behavior tests")
     args = parser.parse_args()
+    if not 0 <= args.history_tasks <= 20000:
+        parser.error("history-tasks must be between 0 and 20000")
     if args.self_test_bucket_contract:
         result = bucket_contract_tests()
         output = ROOT.parent / "outputs/evidence/load-bucket-contract.json"
@@ -423,6 +453,7 @@ def main():
               "host": {"platform": platform.platform(), "machine": platform.machine(), "cpu_count": os.cpu_count()},
               "arguments": vars(args), "sha256": {str(path.relative_to(ROOT)) if path.is_relative_to(ROOT) else str(path): hashlib.sha256(path.read_bytes()).hexdigest() for path in files},
               "cases": [], "cleaned": False,
+              "history_fixture_method": "Synthetic completed state-only fixtures cloned from one real completion. Discovery bootstrap and seeding occur outside timed rounds; no migration latency or retained checkpoint-volume claim.",
               "counted_status_599_meaning": "Proxy sentinel: no complete backend HTTP response recorded.",
               "method": "Burst submission to actual webhook or two-page import handler; real CLI workers. Throughput counts completed top-level workflows and includes worker startup, admission and terminal observation. Nearest-rank latency covers only observed completed workflows, from before submission to first terminal inspection; unfinished latencies are censored. It includes polling/inspection lag; sequential scans can exceed the configured inspection interval. Peak backlog counts nonterminal top-level workflows observed during sequential scans; fast completions before the first scan can be missed. Counted transport adds proxy overhead, including fresh TLS connections for AWS, and measures diagnostic request counts rather than direct capacity. Counts include driver submit/inspect storage traffic, excluding untimed task inventory and cleanup. CPU/RSS sample driver (including fixture/proxy/native client), workers and shared server; excludes RustFS container. CPU uses ps cumulative-time deltas; no ps means unavailable. Retries cover observed terminal workflows only. No general production throughput claim."}
     s3, placement, region, credentials = storage(args.backend, args.transport)
@@ -485,9 +516,12 @@ def main():
                         client = Client.remote(env["ENGINE_URL"], env["ENGINE_TOKEN"])
                     else:
                         client = Client(bucket=bucket, prefix=prefix, region=region)
-                    history = 0
+                    seed_completed_history(s3, bucket, prefix, client, args.history_tasks)
+                    history = args.history_tasks
                     for round_number in range(2):
                         before_tasks = sum(obj["Key"].endswith("/state.json") for page in s3.get_paginator("list_objects_v2").paginate(Bucket=bucket, Prefix=prefix + "/tasks/") for obj in page.get("Contents", []))
+                        if round_number == 0 and before_tasks != args.history_tasks:
+                            raise RuntimeError("pre-burst history count differs from requested fixture count")
                         case = run_round(client, mode, workers, round_number, history, args, env, work, fixture, proxy, server)
                         after_tasks = sum(obj["Key"].endswith("/state.json") for page in s3.get_paginator("list_objects_v2").paginate(Bucket=bucket, Prefix=prefix + "/tasks/") for obj in page.get("Contents", []))
                         case.update(created_tasks_including_children=after_tasks - before_tasks,

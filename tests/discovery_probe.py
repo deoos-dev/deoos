@@ -59,7 +59,8 @@ class CountingProxy:
                 parts = [urllib.parse.unquote(part) for part in parsed.path.split("/") if part]
                 prefixes = [urllib.parse.unquote(value) for value in query.get("prefix", [])]
                 parts.extend(part for value in prefixes for part in value.split("/"))
-                family = "tasks" if "tasks" in parts else "schedules" if "schedules" in parts else "other"
+                family = ("active" if "active" in parts else "tasks" if "tasks" in parts else "schedules" if "schedules" in parts
+                          else "other")
                 with owner.lock:
                     owner.inflight += 1
                 status, size = 599, 0
@@ -115,6 +116,7 @@ class CountingProxy:
                                 error_type, error_errno = type(error).__name__, getattr(error, "errno", None)
                     with owner.lock:
                         owner.rows.append({"operation": operation, "family": family, "status": status, "elapsed_ms": (time.perf_counter() - started) * 1000, "request_bytes": len(body), "response_bytes": size, "list_etags_omitted": list_etags_omitted,
+                                           "list_prefixes": prefixes if operation == "LIST" else [],
                                            "error_type": error_type, "errno": error_errno if isinstance(error_errno, int) else None,
                                            "reply_error_type": reply_error_type})
                         owner.inflight -= 1
@@ -141,6 +143,7 @@ class CountingProxy:
         for row in rows:
             families[row["family"]].append(row)
         return {"requests": dict(collections.Counter(row["operation"] for row in rows)), "statuses": dict(collections.Counter(str(row["status"]) for row in rows)), "request_bytes": sum(row["request_bytes"] for row in rows), "response_bytes": sum(row["response_bytes"] for row in rows), "s3_request_median_ms": statistics.median(durations) if durations else None, "s3_request_max_ms": max(durations) if durations else None,
+                "list_prefixes": sorted({prefix for row in rows for prefix in row.get("list_prefixes", [])}),
                 "error_types": dict(collections.Counter(row["error_type"] for row in rows if row.get("error_type"))),
                 "errnos": dict(collections.Counter(str(row["errno"]) for row in rows if row.get("errno") is not None)),
                 "reply_error_types": dict(collections.Counter(row["reply_error_type"] for row in rows if row.get("reply_error_type"))),
@@ -412,6 +415,10 @@ def main():
                     objects.append((f"{case_prefix}/tasks/{task_id}/state.json", json.dumps(state).encode()))
                 with concurrent.futures.ThreadPoolExecutor(max_workers=16) as pool:
                     list(pool.map(lambda row: s3.put_object(Bucket=bucket, Key=row[0], Body=row[1]), objects))
+                # These are already-terminal records in the current active-index layout.
+                # A ready sentinel separates cold-engine measurement from legacy backfill.
+                s3.put_object(Bucket=bucket, Key=case_prefix + "/active-index.json",
+                              Body=b'{"version":1,"status":"ready"}')
                 start_engine(case_prefix)
                 anchor = int(time.time() * 1000) + 86_400_000
                 for index in range(schedule_count):
