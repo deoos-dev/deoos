@@ -32,6 +32,7 @@ test-package:
 	$(TEST_PYTHON) tests/package_smoke.py
 
 test-filesystem: package
+	cargo test --offline --release --manifest-path engine/Cargo.toml --lib
 	$(TEST_PYTHON) tests/package_smoke.py --backend filesystem
 	$(TEST_PYTHON) tests/local_faults.py --binary engine/target/release/deoos-engine --mounts
 

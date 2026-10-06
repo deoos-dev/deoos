@@ -32,7 +32,7 @@ from jsonschema import Draft202012Validator, validate
 from mcp import Client, StdioServerParameters, stdio_client
 from mcp.shared.exceptions import MCPError
 
-from local_faults import ROOT, Server, wait_marker
+from local_faults import ROOT, Server, wait_marker, fault_target, assert_layout
 
 READ_TOOLS = {'task_list', 'task_summary', 'task_history'}
 ACTION_TOOLS = {'task_cancel', 'task_retry', 'task_signal'}
@@ -293,15 +293,16 @@ async def fault_case(binary, python, base, work, library, mode):
     work.mkdir()
     prefix = 'mcp-fault-' + uuid.uuid4().hex
     storage, arm, marker = work / 'storage', work / 'arm', work / 'marker'
-    target = storage / 'objects' / hashlib.sha256(f'{prefix}/tasks/pending/state.json'.encode()).hexdigest()
+    target_options = fault_target(storage, f'{prefix}/tasks/pending/state.json', 'v2')
     env = dict(base, DEOOS_STORAGE_PROVIDER='filesystem', DEOOS_STORAGE_DIRECTORY=str(storage),
                EXECUTION_PREFIX=prefix, DYLD_INSERT_LIBRARIES=str(library),
-               DEOOS_FAULT_TARGET=str(target), DEOOS_FAULT_ARM=str(arm),
+               **target_options, DEOOS_FAULT_ARM=str(arm),
                DEOOS_FAULT_MARKER=str(marker),
                DEOOS_FAULT_MODE='after-rename' if mode.startswith('closed-output') else mode)
     server = await anyio.to_thread.run_sync(Server, binary, env, work / 'engine.log')
     client_env = remote_env(env, server)
     try:
+        assert_layout(storage, 'v2')
         await anyio.to_thread.run_sync(sdk, python, client_env,
                                       "c.submit('pending', 'pending.v1', {}); print(json.dumps(True))")
         if mode.startswith('closed-output'):

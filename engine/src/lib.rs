@@ -1037,11 +1037,8 @@ impl Engine {
                     .ok_or("filesystem storage requires directory or DEOOS_STORAGE_DIRECTORY")?;
                 let absolute = std::path::absolute(directory)
                     .map_err(|_| "invalid local storage directory")?;
-                Arc::new(
-                    local::LocalObjectStore::new(absolute).map_err(|error| {
-                        format!("cannot initialize filesystem storage: {error}")
-                    })?,
-                )
+                local::open(absolute)
+                    .map_err(|error| format!("cannot initialize filesystem storage: {error}"))?
             }
             "s3" => {
                 if c.directory.is_some() {

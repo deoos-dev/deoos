@@ -32,6 +32,33 @@ import uuid
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 
 
+def seed_storage(storage, layout):
+    assert layout in ('v1', 'v2')
+    if layout == 'v1':
+        storage.mkdir(mode=0o700)
+        for name in ('objects', 'locks'):
+            (storage / name).mkdir(mode=0o700)
+    # A fresh V2 root is initialized by the real compatibility engine.
+
+
+def fault_target(storage, key, layout):
+    assert layout in ('v1', 'v2')
+    target = storage / ('objects' if layout == 'v1' else 'objects-v2') / hashlib.sha256(key.encode()).hexdigest()
+    # The trailing slash prevents matching any neighboring hash directory.
+    return {'DEOOS_FAULT_TARGET': str(target) + ('/' if layout == 'v2' else ''),
+            'DEOOS_FAULT_TARGET_PREFIX': '1' if layout == 'v2' else '0'}
+
+
+def assert_layout(storage, layout):
+    assert (storage / 'locks').is_dir()
+    if layout == 'v1':
+        assert (storage / 'objects').is_dir()
+        assert not (storage / 'objects-v2').exists() and not (storage / 'format-v2').exists()
+    else:
+        assert (storage / 'objects').is_file()
+        assert (storage / 'objects-v2').is_dir() and (storage / 'format-v2').is_file()
+
+
 def request(url, route, body=None, timeout=15):
     data = None if body is None else json.dumps({'protocol_version': 3, **body}).encode()
     req = urllib.request.Request(url + route, data=data,
@@ -97,12 +124,13 @@ def wait_marker(marker, server):
     return marker.read_text()
 
 
-def case(binary, library, work, mode, inherited, new_create=False):
+def case(binary, library, work, mode, inherited, new_create=False, layout="v1"):
     work.mkdir()
     storage = work / 'storage'
     prefix = 'fault-' + uuid.uuid4().hex
     key = f'{prefix}/tasks/recovery/state.json'
-    target = storage / 'objects' / hashlib.sha256(key.encode()).hexdigest()
+    seed_storage(storage, layout)
+    target_options = fault_target(storage, key, layout)
     arm, marker = work / 'arm', work / 'marker'
     env = {key: value for key, value in inherited.items()
            if not key.startswith(('AWS_', 'DEOOS_STORAGE_', 'DEOOS_FAULT_', 'DYLD_'))
@@ -111,14 +139,15 @@ def case(binary, library, work, mode, inherited, new_create=False):
                DEOOS_STORAGE_DIRECTORY=str(storage), EXECUTION_PREFIX=prefix,
                LEASE_MS='1500')
     fault_env = dict(env, DYLD_INSERT_LIBRARIES=str(library),
-                     DEOOS_FAULT_TARGET=str(target), DEOOS_FAULT_ARM=str(arm),
+                     **target_options, DEOOS_FAULT_ARM=str(arm),
                      DEOOS_FAULT_MARKER=str(marker), DEOOS_FAULT_MODE=mode)
     server = Server(binary, fault_env, work / 'fault-server.log')
     claim = {'worker': 'interrupted-owner', 'handlers': ['recovery.v1']}
-    result = {'mode': 'new-create-' + mode if new_create else mode}
+    result = {'mode': 'new-create-' + mode if new_create else mode, 'layout': layout}
     submission = {'id': 'recovery', 'handler': 'recovery.v1',
                   'inputs': {'sentinel': [1, 2, 3]}, 'max_attempts': 3}
     try:
+        assert_layout(storage, layout)
         if new_create:
             assert request(server.url, '/tasks/recovery')[0] == 404
             before = None
@@ -222,13 +251,14 @@ def case(binary, library, work, mode, inherited, new_create=False):
     return result
 
 
-def warm_reader_case(binary, library, work, inherited):
+def warm_reader_case(binary, library, work, inherited, layout="v1"):
     """A warmed reader must certify a different ETag after another writer dies."""
     work.mkdir()
     storage = work / 'storage'
     prefix = 'warm-fault-' + uuid.uuid4().hex
     key = f'{prefix}/tasks/recovery/state.json'
-    target = storage / 'objects' / hashlib.sha256(key.encode()).hexdigest()
+    seed_storage(storage, layout)
+    target_options = fault_target(storage, key, layout)
     reader_arm, reader_marker = work / 'reader-arm', work / 'reader-marker'
     writer_arm, writer_marker = work / 'writer-arm', work / 'writer-marker'
     env = {key: value for key, value in inherited.items()
@@ -238,15 +268,16 @@ def warm_reader_case(binary, library, work, inherited):
                DEOOS_STORAGE_DIRECTORY=str(storage), EXECUTION_PREFIX=prefix,
                LEASE_MS='1500')
     reader_env = dict(env, DYLD_INSERT_LIBRARIES=str(library),
-                      DEOOS_FAULT_TARGET=str(target), DEOOS_FAULT_ARM=str(reader_arm),
+                      **target_options, DEOOS_FAULT_ARM=str(reader_arm),
                       DEOOS_FAULT_MARKER=str(reader_marker), DEOOS_FAULT_MODE='fail-read-sync')
     writer_env = dict(env, DYLD_INSERT_LIBRARIES=str(library),
-                      DEOOS_FAULT_TARGET=str(target), DEOOS_FAULT_ARM=str(writer_arm),
+                      **target_options, DEOOS_FAULT_ARM=str(writer_arm),
                       DEOOS_FAULT_MARKER=str(writer_marker), DEOOS_FAULT_MODE='after-rename')
     reader = Server(binary, reader_env, work / 'warm-reader.log')
     writer = None
-    result = {'mode': 'warm-reader-new-version', 'same_reader_process': True}
+    result = {'mode': 'warm-reader-new-version', 'same_reader_process': True, 'layout': layout}
     try:
+        assert_layout(storage, layout)
         before = successful(reader.url, '/tasks', {
             'id': 'recovery', 'handler': 'recovery.v1',
             'inputs': {'sentinel': [1, 2, 3]}, 'max_attempts': 3})
@@ -331,12 +362,15 @@ def run_faults(binary, inherited=None):
         library = work / 'local_faults.dylib'
         subprocess.run(['clang', '-dynamiclib', '-Wall', '-Wextra', '-Werror',
                         '-o', str(library), str(ROOT / 'tests/local_faults.c')], check=True)
-        for mode in ('before-rename', 'after-rename', 'fail-sync'):
-            report['checks'].append(case(binary, library, work / mode, mode, inherited))
-        report['checks'].append(warm_reader_case(binary, library, work / 'warm-reader', inherited))
-        for mode in ('before-rename', 'after-rename', 'fail-sync'):
-            report['checks'].append(case(binary, library, work / ('new-create-' + mode),
-                                         mode, inherited, new_create=True))
+        for layout in ('v1', 'v2'):
+            format_work = work / layout
+            format_work.mkdir()
+            for mode in ('before-rename', 'after-rename', 'fail-sync'):
+                report['checks'].append(case(binary, library, format_work / mode, mode, inherited, layout=layout))
+            report['checks'].append(warm_reader_case(binary, library, format_work / 'warm-reader', inherited, layout=layout))
+            for mode in ('before-rename', 'after-rename', 'fail-sync'):
+                report['checks'].append(case(binary, library, format_work / ('new-create-' + mode),
+                                             mode, inherited, new_create=True, layout=layout))
     assert not pathlib.Path(temporary).exists(), 'fault-test temporary files survived cleanup'
     report['cleaned'] = True
     return report
@@ -401,7 +435,7 @@ def run_mounts(binary, report):
 
     def unmounted(case, snapshot):
         assert attachment(case, snapshot) is None, f'owned image still attached: {case["image"]}'
-        for directory in ('objects', 'locks'):
+        for directory in case['namespaces']:
             path = case['root'] / directory
             if path.exists():
                 assert not os.path.ismount(path) and path.stat().st_dev == case['root'].stat().st_dev, path
@@ -461,21 +495,32 @@ def run_mounts(binary, report):
                 'stderr': completed.stderr, 'elapsed_seconds': time.monotonic()-started}
 
     try:
-        baseline = work / 'ordinary'
-        baseline.mkdir(mode=0o700)
-        result['ordinary_baseline'] = probe(baseline)
-        assert result['ordinary_baseline']['returncode'] == 0, result['ordinary_baseline']
+        result['ordinary_baselines'] = {}
+        for layout in ('v1', 'v2'):
+            baseline = work / ('ordinary-' + layout)
+            if layout == 'v1':
+                seed_storage(baseline, layout)
+            else:
+                baseline.mkdir(mode=0o700)
+            result['ordinary_baselines'][layout] = probe(baseline)
+            assert result['ordinary_baselines'][layout]['returncode'] == 0, result['ordinary_baselines'][layout]
+            assert_layout(baseline, layout)
         # A successful real filesystem qualification establishes that this
         # host root passes the adapter's local APFS and permission checks.
-        for namespace in ('objects', 'locks'):
-            root = work / (namespace + '-case')
+        for layout, namespace in (('v1', 'objects'), ('v1', 'locks'), ('v2', 'objects-v2'), ('v2', 'locks')):
+            namespaces = ('objects' if layout == 'v1' else 'objects-v2', 'locks')
+            root = work / (layout + '-' + namespace + '-case')
             root.mkdir(mode=0o700)
-            for name in ('objects', 'locks'):
+            for name in namespaces:
                 (root / name).mkdir(mode=0o700)
-            image, mount = work / (namespace + '.sparseimage'), root / namespace
-            row = {'namespace': namespace, 'image': str(image), 'mountpoint': str(mount)}
+            image, mount = work / (layout + '-' + namespace + '.sparseimage'), root / namespace
+            row = {'layout': layout, 'namespace': namespace, 'image': str(image), 'mountpoint': str(mount)}
             result['checks'].append(row)
-            case = dict(root=root, image=image, mount=mount, attach_started=False, evidence=row)
+            if layout == 'v2':
+                row['initialization'] = probe(root)
+                assert row['initialization']['returncode'] == 0, row['initialization']
+                assert_layout(root, layout)
+            case = dict(root=root, image=image, mount=mount, namespaces=namespaces, attach_started=False, evidence=row)
             cases.append(case)
             try:
                 command(['/usr/bin/hdiutil', 'create', '-size', '256m', '-type', 'SPARSE', '-fs', 'APFS',
@@ -498,15 +543,15 @@ def run_mounts(binary, report):
                 assert mount.stat().st_uid == os.getuid(), mount
                 row['mounted_mode_before'] = oct(stat.S_IMODE(mount.stat().st_mode))
                 mount.chmod(0o700)
-                row['directories'] = [private(root), private(root / 'objects'), private(root / 'locks')]
+                row['directories'] = [private(root), *[private(root / name) for name in namespaces]]
                 assert mount.stat().st_dev != root.stat().st_dev, 'test did not create a different filesystem'
-                sibling = root / ('locks' if namespace == 'objects' else 'objects')
+                sibling = root / (namespaces[1] if namespace == namespaces[0] else namespaces[0])
                 assert sibling.stat().st_dev == root.stat().st_dev
                 row['rejection'] = probe(root)
                 assert row['rejection']['returncode'] == 1, row['rejection']
                 diagnostic = 'must be on the same APFS filesystem; nested mounts are unsupported'
                 assert diagnostic in row['rejection']['stderr'], row['rejection']
-                row['objects_entries'] = sorted(entry.name for entry in (root / 'objects').iterdir())
+                row['objects_entries'] = sorted(entry.name for entry in (root / namespaces[0]).iterdir())
                 assert not any(re.fullmatch(r'[0-9a-f]{64}', name) for name in row['objects_entries']), row
                 row['no_committed_envelopes'] = True
             finally:
