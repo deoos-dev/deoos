@@ -11,6 +11,10 @@
 //! health probes; writes always perform their durability barriers.
 //! Root, objects, locks and bootstrap must share one local APFS filesystem.
 //! Mounting over or replacing store paths while clients are open is unsupported.
+//! Concurrent calls on clones may share a full flush only after each caller's
+//! own fsync. Both pre-rename and post-publication durability waits remain.
+mod durability_epochs;
+
 use std::{
     collections::{BTreeSet, HashMap},
     fmt,
@@ -98,6 +102,7 @@ pub(super) struct LocalObjectStore {
     key_hints: Arc<Mutex<HashMap<String, Path>>>,
     // Fixed-size hashes and validated UUID ETags; never cached object content.
     durable_etags: Arc<Mutex<HashMap<String, String>>>,
+    durability_epochs: Arc<durability_epochs::Coordinator>,
 }
 impl fmt::Display for LocalObjectStore {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -141,6 +146,7 @@ impl LocalObjectStore {
             root: root.to_path_buf(),
             key_hints: Arc::new(Mutex::new(HashMap::new())),
             durable_etags: Arc::new(Mutex::new(HashMap::new())),
+            durability_epochs: Arc::new(durability_epochs::Coordinator::default()),
         };
         check_private_dir(root)?;
         check_filesystem(root)?;
@@ -197,14 +203,24 @@ impl LocalObjectStore {
     /// Caller holds the stable key lock for this entire operation and its use of
     /// the returned file. Published envelopes are immutable; every put gets a
     /// fresh UUID, including delete/recreate and same-content replacements.
-    fn read_durable_header(&self, hash: &str, lock: &File) -> Result<Option<(Header, File)>> {
+    fn read_durable_header(
+        &self,
+        hash: &str,
+        lock: &File,
+        allow_absent_put: bool,
+    ) -> Result<Option<(Header, File)>> {
         let current = self.read_header(hash);
+        // Only a proceeding Create/Overwrite may defer stabilizing absence. It
+        // must either publish with both write barriers or barrier before error.
+        if allow_absent_put && matches!(&current, Ok(None)) {
+            return current;
+        }
         if let Ok(Some((header, _))) = &current
             && self.confirmed_durable(hash, &header.etag)
         {
             return current;
         }
-        // Even absence and invalid/unreadable headers require this barrier.
+        // Reads, conflicts and invalid/unreadable headers require this barrier.
         // A barrier failure takes precedence over the original read error.
         self.barrier(lock)?;
         if let Ok(Some((header, _))) = &current {
@@ -228,7 +244,7 @@ impl LocalObjectStore {
     fn barrier(&self, lock: &File) -> Result<()> {
         sync_dir(&self.root.join("objects")).map_err(durability)?;
         sync_dir(&self.root.join("locks")).map_err(durability)?;
-        full_sync(lock).map_err(durability)
+        self.durability_epochs.sync(lock).map_err(durability)
     }
     fn read_header(&self, hash: &str) -> Result<Option<(Header, File)>> {
         let mut file = match open_private_file(&self.object_path(hash), false) {
@@ -276,7 +292,9 @@ impl LocalObjectStore {
         }
         let hash = digest(key.as_ref());
         let lock = self.lock(&hash)?;
-        let current = self.read_durable_header(&hash, &lock)?;
+        let allow_absent_put = matches!(&opts.mode, PutMode::Create | PutMode::Overwrite);
+        let current = self.read_durable_header(&hash, &lock, allow_absent_put)?;
+        let deferred_absence = allow_absent_put && current.is_none();
         match opts.mode {
             PutMode::Create if current.is_some() => {
                 return Err(Error::AlreadyExists {
@@ -294,27 +312,27 @@ impl LocalObjectStore {
             }
             _ => {}
         }
-        let etag = Uuid::new_v4().to_string();
-        let header = Header {
-            key: key.to_string(),
-            etag: etag.clone(),
-            size: payload.content_length() as u64,
-            modified_ms: SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .map_err(generic)?
-                .as_millis()
-                .try_into()
-                .map_err(generic)?,
-        };
-        let header_bytes = serde_json::to_vec(&header).map_err(generic)?;
-        if header_bytes.len() > MAX_HEADER {
-            return Err(generic("local object key is too long"));
-        }
         let temporary = self
             .root
             .join("objects")
             .join(format!(".tmp-{}", Uuid::new_v4()));
         let result = (|| {
+            let etag = Uuid::new_v4().to_string();
+            let header = Header {
+                key: key.to_string(),
+                etag: etag.clone(),
+                size: payload.content_length() as u64,
+                modified_ms: SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .map_err(generic)?
+                    .as_millis()
+                    .try_into()
+                    .map_err(generic)?,
+            };
+            let header_bytes = serde_json::to_vec(&header).map_err(generic)?;
+            if header_bytes.len() > MAX_HEADER {
+                return Err(generic("local object key is too long"));
+            }
             let mut file = create_new_private_file(&temporary)?;
             file.write_all(MAGIC).map_err(generic)?;
             file.write_all(&(header_bytes.len() as u32).to_le_bytes())
@@ -323,7 +341,7 @@ impl LocalObjectStore {
             for chunk in payload {
                 file.write_all(&chunk).map_err(generic)?;
             }
-            full_sync(&file).map_err(durability)?;
+            self.durability_epochs.sync(&file).map_err(durability)?;
             fs::rename(&temporary, self.object_path(&hash)).map_err(generic)?;
             self.barrier(&lock)?;
             self.remember_durable(&hash, &etag);
@@ -335,6 +353,12 @@ impl LocalObjectStore {
         })();
         // Temp files are never visible objects. A crash may leave one behind.
         let _ = fs::remove_file(&temporary);
+        if deferred_absence && result.is_err() {
+            // Do not expose even a validation/I/O error based on unstabilized
+            // absence. Barrier failure takes precedence; an original durability
+            // error remains an error even if this later barrier succeeds.
+            self.barrier(&lock)?;
+        }
         result
     }
     fn get_sync(&self, key: Path, options: GetOptions) -> Result<GetResult> {
@@ -344,7 +368,7 @@ impl LocalObjectStore {
         let hash = digest(key.as_ref());
         let lock = self.lock(&hash)?;
         let (header, mut file) = self
-            .read_durable_header(&hash, &lock)?
+            .read_durable_header(&hash, &lock, false)?
             .ok_or_else(|| missing(&key))?;
         let meta = header.meta()?;
         options.check_preconditions(&meta)?;
@@ -403,7 +427,7 @@ impl LocalObjectStore {
                 continue;
             }
             let lock = self.lock(hash)?;
-            if let Some((header, _)) = self.read_durable_header(hash, &lock)? {
+            if let Some((header, _)) = self.read_durable_header(hash, &lock, false)? {
                 let meta = header.meta()?;
                 if prefix
                     .as_ref()
@@ -680,6 +704,19 @@ fn sync_dir(path: &FsPath) -> io::Result<()> {
 }
 #[cfg(not(target_os = "macos"))]
 fn sync_dir(_: &FsPath) -> io::Result<()> {
+    Err(io::Error::other("unsupported local storage platform"))
+}
+#[cfg(target_os = "macos")]
+fn ordinary_sync(file: &File) -> io::Result<()> {
+    use std::os::fd::AsRawFd;
+    if unsafe { libc::fsync(file.as_raw_fd()) } == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+#[cfg(not(target_os = "macos"))]
+fn ordinary_sync(_: &File) -> io::Result<()> {
     Err(io::Error::other("unsupported local storage platform"))
 }
 #[cfg(target_os = "macos")]
