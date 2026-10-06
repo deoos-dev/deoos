@@ -11,6 +11,9 @@ def main():
     parser = argparse.ArgumentParser(prog="python -m deoos")
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("list", help="list up to 100 tasks")
+    mcp = commands.add_parser("mcp", help="serve MCP 2025-11-25 over stdio")
+    mcp.add_argument("--allow-actions", action="store_true",
+                     help="expose task cancel, retry and signal tools")
 
     inspect = commands.add_parser("inspect", help="inspect a task")
     inspect.add_argument("id")
@@ -33,6 +36,9 @@ def main():
     schedule.add_argument("id")
 
     args = parser.parse_args()
+    if args.command == "mcp":
+        from .mcp import serve
+        return serve(allow_actions=args.allow_actions)
     url = os.environ.get("ENGINE_URL")
     token = os.environ.get("ENGINE_TOKEN")
     client = None

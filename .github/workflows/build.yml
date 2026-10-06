@@ -85,6 +85,9 @@ jobs:
           python tests/use_cases.py
           python tests/discovery_contract.py
           python tests/active_discovery_contract.py
+          python packaging/build_package.py --package-only
+          python -m pip install ../outputs/deoos-*/python/*.whl
+          python tests/mcp_behavior.py --binary engine/target/release/deoos-engine --backend rustfs --report ../outputs/evidence/mcp-rustfs.json
       - name: Capture RustFS logs and remove its volume
         if: always()
         run: |
@@ -180,6 +183,8 @@ jobs:
         run: |
           python tests/package_smoke.py --backend filesystem
           python tests/local_faults.py --binary engine/target/release/deoos-engine
+          python -m pip install ../outputs/deoos-*/python/*.whl
+          python tests/mcp_behavior.py --binary engine/target/release/deoos-engine --backend filesystem --faults --report ../outputs/evidence/mcp-filesystem.json
       - name: Validate required AWS account configuration
         run: python packaging/ci.py account-config
       - name: Obtain short-lived credentials for the configured test account

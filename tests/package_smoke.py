@@ -436,7 +436,17 @@ try:
     waiting = summary('approval', 'waiting')
     assert waiting['wait'] == {'kind': 'signal', 'name': 'approved', 'assigned': False}
     assert waiting['completed_steps'] == ['before'] and waiting['actions'] == ['cancel', 'signal']
-    c.signal('approval', 'approved', {'private': secrets[2]})
+    signalled = c.signal('approval', 'approved', {'private': secrets[2]}, 'approval-signal')
+    assert signalled['signals']['approved'].endswith('/approval-signal.json'), signalled['signals']
+    assert c.signal('approval', 'approved', {'private': secrets[2]}, 'approval-signal') == signalled
+    try:
+        c.signal('approval', 'approved', {'private': 'different'}, 'approval-signal')
+    except EngineError as error:
+        assert error.status == 409, error
+    else:
+        raise AssertionError('stable signal operation ID accepted a different value')
+    assert c.inspect('approval') == signalled
+    passed.append('stable signal operation ID replays and rejects a different value')
     assigned = summary('approval', 'waiting')
     assert assigned['wait']['assigned'] is True and assigned['actions'] == ['cancel']
     assert c.run_once({'approval.v1': approval})
@@ -608,7 +618,13 @@ assert.equal(await c.runOnce({'approval.v1': approval}), true);
 const waiting = await summary('approval', 'waiting');
 assert.deepEqual(waiting.wait, {kind: 'signal', name: 'approved', assigned: false});
 assert.deepEqual(waiting.completed_steps, ['before']); assert.deepEqual(waiting.actions, ['cancel', 'signal']);
-await c.signal('approval', 'approved', {private: secrets[2]});
+const signalled = await c.signal('approval', 'approved', {private: secrets[2]}, 'approval-signal');
+assert(signalled.signals.approved.endsWith('/approval-signal.json'), JSON.stringify(signalled.signals));
+assert.deepEqual(await c.signal('approval', 'approved', {private: secrets[2]}, 'approval-signal'), signalled);
+await assert.rejects(c.signal('approval', 'approved', {private: 'different'}, 'approval-signal'),
+  error => error.status === 409);
+assert.deepEqual(await c.inspect('approval'), signalled);
+passed.push('stable signal operation ID replays and rejects a different value');
 const assigned = await summary('approval', 'waiting');
 assert.equal(assigned.wait.assigned, true); assert.deepEqual(assigned.actions, ['cancel']);
 assert.equal(await c.runOnce({'approval.v1': approval}), true);

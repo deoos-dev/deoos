@@ -83,13 +83,13 @@ export class Client {
     return response.json();
   }
   submit(id:string,handler:string,inputs:unknown,max_attempts=3,retry_ms=0) { return this.request('/tasks',{id,handler,inputs,max_attempts,retry_ms}); }
-  signal(id:string,name:string,value:unknown){validStep(id);validStep(name);return this.request(`/tasks/${id}/signals/${name}`,{operation_id:randomUUID(),value});}
+  signal(id:string,name:string,value:unknown,operationId:string=randomUUID()){validStep(id);validStep(name);validStep(operationId);return this.request(`/tasks/${id}/signals/${name}`,{operation_id:operationId,value});}
   cancel(id:string){validStep(id);return this.request(`/tasks/${id}/cancel`,{});}
   inspect(id:string){validStep(id);return this.request(`/tasks/${id}`);}
   /** Persisted progress metadata without inputs, outputs, or checkpoint values. */
   summary(id:string):Promise<ExecutionSummary>{validStep(id);return this.request(`/tasks/${id}/summary`);}
   listTasks(){return this.request('/tasks');}
-  retry(id:string,expected_revision:string,operation_id=randomUUID()){
+  retry(id:string,expected_revision:string,operation_id:string=randomUUID()){
     validStep(id);validStep(expected_revision);validStep(operation_id);
     return this.request(`/tasks/${id}/retry`,{expected_revision,operation_id});
   }
@@ -109,7 +109,7 @@ export class Client {
     if(end_ms<=start_ms||limit>1000)throw new Error('invalid backfill range or limit');
     return this.request(`/schedules/${id}/backfill`,{start_ms,end_ms,limit});
   }
-  async runOnce(handlers:Record<string,Handler>,worker=randomUUID()):Promise<boolean> {
+  async runOnce(handlers:Record<string,Handler>,worker:string=randomUUID()):Promise<boolean> {
     return this.executeOnce(handlers,worker);
   }
   /**

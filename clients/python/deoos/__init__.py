@@ -175,11 +175,14 @@ class Client:
             start_ms=start_ms, end_ms=end_ms, limit=limit,
         ))
 
-    def signal(self, task_id, name, value):
+    def signal(self, task_id, name, value, operation_id=None):
         _valid_step(task_id)
         _valid_step(name)
+        if operation_id is None:
+            operation_id = str(uuid.uuid4())
+        _valid_step(operation_id)
         return self.request(f"/tasks/{task_id}/signals/{name}",
-                            {"operation_id": str(uuid.uuid4()), "value": value})
+                            {"operation_id": operation_id, "value": value})
 
     def cancel(self, task_id):
         _valid_step(task_id)
