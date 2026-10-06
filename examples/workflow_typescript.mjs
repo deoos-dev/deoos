@@ -2,7 +2,6 @@
 // Cross-language durable order demo; no payment or external service is called.
 import { randomUUID } from 'node:crypto';
 import { parseArgs } from 'node:util';
-import { setTimeout as delay } from 'node:timers/promises';
 import { Client } from 'deoos';
 
 const MAX_SAFE_INTEGER = Number.MAX_SAFE_INTEGER;
@@ -35,9 +34,14 @@ function createClient() {
     return Client.remote(process.env.ENGINE_URL, process.env.ENGINE_TOKEN);
   }
   if (mode === 'library') {
-    if (!process.env.AWS_BUCKET) throw new Error('AWS_BUCKET is required when DEOOS_MODE=library');
+    const provider = process.env.DEOOS_STORAGE_PROVIDER ?? 's3';
+    if (!['s3', 'gcs', 'azure'].includes(provider)) {
+      throw new Error("DEOOS_STORAGE_PROVIDER must be 's3', 'gcs', or 'azure'");
+    }
+    const bucket = process.env.DEOOS_STORAGE_BUCKET || (provider === 's3' ? process.env.AWS_BUCKET : undefined);
+    if (!bucket) throw new Error('DEOOS_STORAGE_BUCKET is required in library mode (AWS_BUCKET is an S3 fallback)');
     return new Client({
-      bucket: process.env.AWS_BUCKET,
+      provider, bucket,
       prefix: process.env.EXECUTION_PREFIX ?? 'durable-v3',
     });
   }
@@ -89,7 +93,7 @@ async function main() {
     console.log('  work [--once]');
     console.log('  approve --id ID [--decline]');
     console.log('  inspect --id ID');
-    console.log('Set DEOOS_MODE=server with ENGINE_URL, or DEOOS_MODE=library with AWS_BUCKET.');
+    console.log('Set DEOOS_MODE=server with ENGINE_URL, or DEOOS_MODE=library with DEOOS_STORAGE_BUCKET and optional DEOOS_STORAGE_PROVIDER (default s3). AWS_BUCKET is an S3 fallback.');
     return;
   }
   const { values, positionals } = parseArgs({
@@ -133,21 +137,22 @@ async function main() {
     return;
   }
 
-  let stopping = false;
-  const stop = () => { stopping = true; };
+  const stopping = new AbortController();
+  const stop = () => { stopping.abort(); };
   process.on('SIGINT', stop);
+  process.on('SIGTERM', stop);
   try {
-    while (!stopping) {
-      try {
-        const worked = await client.runOnce(handlers);
-        if (!worked && !stopping) await delay(1000);
-      } catch (error) {
-        console.error(error?.message ?? String(error));
-        if (!stopping) await delay(1000);
-      }
-    }
+    await client.runWorker(handlers, {
+      signal: stopping.signal, pollIntervalMs: 1000,
+      onError: (error, taskId) => {
+        if (taskId === undefined) return 'propagate';
+        console.error(`Task ${taskId} failed: ${error?.message ?? String(error)}`);
+        return 'continue';
+      },
+    });
   } finally {
     process.off('SIGINT', stop);
+    process.off('SIGTERM', stop);
   }
 }
 

@@ -909,6 +909,53 @@ async fn claim(State(e): State<Engine>, Json(c): Json<Claim>) -> ApiResult<Value
 async fn inspect(State(e): State<Engine>, Path(id): Path<String>) -> ApiResult<Task> {
     Ok(Json(e.read(&id).await?.0))
 }
+// A state-only projection: never fetch checkpoint values or discover other tasks.
+fn execution_summary(t: &Task) -> Value {
+    let wait = if t.status == "waiting" {
+        match &t.waiting_on {
+            Some(WaitCondition::Timer { name }) => json!({"kind":"timer", "name":name,
+                "deadline_ms":t.timers.get(name).map(|timer| timer.deadline)}),
+            Some(WaitCondition::Signal { name }) => json!({"kind":"signal", "name":name,
+                "assigned":t.signals.contains_key(name)}),
+            Some(WaitCondition::Children { ids }) => json!({"kind":"children", "ids":ids}),
+            None => Value::Null,
+        }
+    } else {
+        Value::Null
+    };
+    let failure = t.history.iter().rev().find(|event| event.event == "fail");
+    let message = failure
+        .and_then(|event| event.detail.as_ref())
+        .or(t.error.as_ref());
+    let last_failure = message.map(|message| {
+        let clean: String = message
+            .chars()
+            .map(|c| if c.is_control() { ' ' } else { c })
+            .collect();
+        let mut end = clean.len().min(512);
+        while !clean.is_char_boundary(end) {
+            end -= 1;
+        }
+        json!({"message":&clean[..end], "at_ms":failure.map(|event| event.at_ms)})
+    });
+    let mut actions = Vec::new();
+    match t.status.as_str() {
+        "queued" | "running" | "waiting" => actions.push("cancel"),
+        "failed" | "cancelled" => actions.push("retry"),
+        _ => {}
+    }
+    if t.status == "waiting" {
+        if let Some(WaitCondition::Signal { name }) = &t.waiting_on {
+            if !t.signals.contains_key(name) {
+                actions.push("signal");
+            }
+        }
+    }
+    json!({"summary_version":1, "id":t.id, "handler":t.handler, "status":t.status,
+        "attempts":t.attempts, "max_attempts":t.max_attempts,
+        "available_at_ms":t.available_at, "completed_steps":t.steps.keys().collect::<Vec<_>>(),
+        "wait":wait, "last_failure":last_failure, "actions":actions})
+}
 async fn result(
     State(e): State<Engine>,
     Path((id, name)): Path<(String, String)>,
@@ -1114,6 +1161,9 @@ impl Engine {
             return inspect(State(self.clone()), Path(id.into()))
                 .await
                 .map(|v| json!(v.0));
+        }
+        if method == "GET" && parts.len() == 3 && parts[2] == "summary" {
+            return Ok(execution_summary(&self.read(id).await?.0));
         }
         if method == "POST" && parts.len() == 4 && parts[2] == "definitions" {
             return self

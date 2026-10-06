@@ -2,8 +2,9 @@
 import argparse
 import json
 import os
+import signal
 import sys
-import time
+import threading
 import uuid
 
 from deoos import Client
@@ -33,10 +34,14 @@ def create_client():
             raise ValueError("ENGINE_URL is required when DEOOS_MODE=server")
         return Client.remote(url, token=os.environ.get("ENGINE_TOKEN"))
     if mode == "library":
-        bucket = os.environ.get("AWS_BUCKET")
+        provider = os.environ.get("DEOOS_STORAGE_PROVIDER", "s3")
+        if provider not in ("s3", "gcs", "azure"):
+            raise ValueError("DEOOS_STORAGE_PROVIDER must be 's3', 'gcs', or 'azure'")
+        bucket = os.environ.get("DEOOS_STORAGE_BUCKET") or (
+            os.environ.get("AWS_BUCKET") if provider == "s3" else None)
         if not bucket:
-            raise ValueError("AWS_BUCKET is required when DEOOS_MODE=library")
-        return Client(bucket=bucket, prefix=os.environ.get("EXECUTION_PREFIX", "durable-v3"))
+            raise ValueError("DEOOS_STORAGE_BUCKET is required in library mode (AWS_BUCKET is an S3 fallback)")
+        return Client(provider=provider, bucket=bucket, prefix=os.environ.get("EXECUTION_PREFIX", "durable-v3"))
     raise ValueError("DEOOS_MODE must be 'library' or 'server'")
 
 
@@ -123,18 +128,24 @@ def main():
             result = {"worked": client.run_once(HANDLERS)}
         else:
             result = None
+            stopping = threading.Event()
+
+            def stop(_signum, _frame):
+                stopping.set()
+
+            def worker_error(error, task_id):
+                if task_id is None:
+                    return "propagate"
+                print(f"Task {task_id} failed: {error}", file=sys.stderr)
+                return "continue"
+
+            previous = {name: signal.signal(name, stop) for name in (signal.SIGINT, signal.SIGTERM)}
             try:
-                while True:
-                    try:
-                        worked = client.run_once(HANDLERS)
-                    except Exception as error:
-                        print(str(error), file=sys.stderr)
-                        time.sleep(1)
-                        continue
-                    if not worked:
-                        time.sleep(1)
-            except KeyboardInterrupt:
-                pass
+                client.run_worker(HANDLERS, stop_event=stopping, poll_interval=1,
+                                  on_error=worker_error)
+            finally:
+                for name, handler in previous.items():
+                    signal.signal(name, handler)
         if result is not None:
             print(json.dumps(result, indent=2, sort_keys=True))
         return 0

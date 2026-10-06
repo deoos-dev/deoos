@@ -1,11 +1,13 @@
 """Worker SDK: in-process library or explicit shared-server connection."""
 import hashlib
 import json
+import math
 import threading
 import time
 import urllib.request
 import urllib.error
 import uuid
+from collections.abc import Mapping
 
 class EngineError(RuntimeError):
     def __init__(self, status, message):
@@ -103,6 +105,11 @@ class Client:
         _valid_step(task_id)
         return self.request(f"/tasks/{task_id}")
 
+    def summary(self, task_id):
+        """Return persisted progress metadata without inputs, outputs, or checkpoint values."""
+        _valid_step(task_id)
+        return self.request(f"/tasks/{task_id}/summary")
+
     def list_tasks(self):
         return self.request("/tasks")
 
@@ -170,6 +177,62 @@ class Client:
         return self.request(f"/tasks/{task_id}/cancel", {})
 
     def run_once(self, handlers, worker_id=None):
+        return self._run_once(handlers, worker_id)
+
+    def run_worker(self, handlers, *, stop_event, poll_interval=0.1,
+                   worker_id=None, on_error=None):
+        """Run one polling loop until an application-owned Event is set.
+
+        Shutdown interrupts idle waiting and finishes an in-flight run_once.
+        Errors propagate by default. on_error(error, task_id) must return
+        'continue' or 'propagate'; task_id is set only after the task's failure
+        was successfully recorded. This does not classify the error's origin:
+        an error inside a handler may come from application or storage code.
+        Claim, ownership, and terminal mutation failures have no task_id.
+        'continue' waits poll_interval seconds before polling.
+        KeyboardInterrupt and SystemExit always propagate. No signals or
+        client lifecycle are managed here.
+        """
+        if not isinstance(handlers, Mapping) or not handlers:
+            raise ValueError("handlers must be a nonempty mapping of callables")
+        handlers = dict(handlers)
+        for name, handler in handlers.items():
+            _valid_step(name)
+            if not callable(handler):
+                raise ValueError("handlers must be a nonempty mapping of callables")
+        if not isinstance(stop_event, threading.Event):
+            raise ValueError("stop_event must be an application-owned threading.Event")
+        if (isinstance(poll_interval, bool) or not isinstance(poll_interval, (int, float))
+                or poll_interval <= 0 or poll_interval > threading.TIMEOUT_MAX
+                or not math.isfinite(poll_interval)):
+            raise ValueError("poll_interval must be a positive finite number of seconds")
+        if on_error is not None and not callable(on_error):
+            raise ValueError("on_error must be callable")
+        worker_id = str(uuid.uuid4()) if worker_id is None else worker_id
+        _valid_step(worker_id)
+        while not stop_event.is_set():
+            failed_task_id = None
+
+            def recorded_failure(task_id):
+                nonlocal failed_task_id
+                failed_task_id = task_id
+
+            try:
+                worked = self._run_once(handlers, worker_id, recorded_failure)
+            except Exception as error:
+                if on_error is None:
+                    raise
+                decision = on_error(error, failed_task_id)
+                if decision == "propagate":
+                    raise
+                if decision != "continue":
+                    raise ValueError("on_error must return 'continue' or 'propagate'") from error
+                stop_event.wait(poll_interval)
+            else:
+                if not worked:
+                    stop_event.wait(poll_interval)
+
+    def _run_once(self, handlers, worker_id=None, recorded_failure=None):
         task = self.request("/claim", dict(worker=worker_id or str(uuid.uuid4()), handlers=list(handlers)))["task"]
         if task is None:
             return False
@@ -199,6 +262,8 @@ class Client:
             if isinstance(error, Exception) and ctx.ownership_error is None:
                 failure = {"error": str(error), "terminal": True} if isinstance(error, ChildFailed) else str(error)
                 ctx.mutate("fail", failure)
+                if recorded_failure is not None:
+                    recorded_failure(task["id"])
             raise
         else:
             stop.set(); thread.join()

@@ -7,6 +7,29 @@ interface NativeHandle {request(method:string,path:string,data:string):Promise<s
 export interface HistoryEvent {at_ms:number;event:string;attempts:number;generation:number;detail?:unknown}
 export interface Task { history?:HistoryEvent[];revision?:string;status?:string; version:number; id:string; handler:string; inputs:unknown; token:string; expires_at:number; steps:Record<string,string>;schedule?:{id:string;scheduled_at:number}|null }
 export type Handler = (context:Context, inputs:any) => unknown | Promise<unknown>;
+export interface ExecutionSummary {
+  summary_version:1;
+  id:string;
+  handler:string;
+  status:'queued'|'running'|'waiting'|'completed'|'failed'|'cancelled';
+  attempts:number;
+  max_attempts:number;
+  available_at_ms:number;
+  completed_steps:string[];
+  wait:{kind:'timer';name:string;deadline_ms:number|null}
+    | {kind:'signal';name:string;assigned:boolean}
+    | {kind:'children';ids:string[]}
+    | null;
+  last_failure:{message:string;at_ms:number|null}|null;
+  actions:Array<'cancel'|'retry'|'signal'>;
+}
+export interface WorkerOptions {
+  signal:AbortSignal;
+  pollIntervalMs?:number;
+  workerId?:string;
+  /** taskId means the task failure was recorded; it does not classify error origin. */
+  onError?:(error:unknown,taskId?:string)=>'continue'|'propagate'|Promise<'continue'|'propagate'>;
+}
 export class EngineError extends Error {
   constructor(public status:number, message:string){super(`${status}: ${message}`);this.name="EngineError";}
 }
@@ -55,6 +78,8 @@ export class Client {
   signal(id:string,name:string,value:unknown){validStep(id);validStep(name);return this.request(`/tasks/${id}/signals/${name}`,{operation_id:randomUUID(),value});}
   cancel(id:string){validStep(id);return this.request(`/tasks/${id}/cancel`,{});}
   inspect(id:string){validStep(id);return this.request(`/tasks/${id}`);}
+  /** Persisted progress metadata without inputs, outputs, or checkpoint values. */
+  summary(id:string):Promise<ExecutionSummary>{validStep(id);return this.request(`/tasks/${id}/summary`);}
   listTasks(){return this.request('/tasks');}
   retry(id:string,expected_revision:string,operation_id=randomUUID()){
     validStep(id);validStep(expected_revision);validStep(operation_id);
@@ -77,6 +102,52 @@ export class Client {
     return this.request(`/schedules/${id}/backfill`,{start_ms,end_ms,limit});
   }
   async runOnce(handlers:Record<string,Handler>,worker=randomUUID()):Promise<boolean> {
+    return this.executeOnce(handlers,worker);
+  }
+  /**
+   * One polling loop; the application owns signal and client lifecycle.
+   * Abort interrupts idle waits and stops new claims after in-flight work finishes.
+   * Errors propagate unless onError explicitly returns 'continue'; that decision
+   * waits pollIntervalMs before retrying. taskId identifies a recorded task failure,
+   * not error origin: application or storage errors inside a handler can receive it.
+   * Claim, ownership, and terminal mutation failures have no taskId.
+   */
+  async runWorker(handlers:Record<string,Handler>,options:WorkerOptions):Promise<void> {
+    if(!handlers||typeof handlers!=='object'||Array.isArray(handlers)||Object.keys(handlers).length===0)throw new Error('handlers must be a nonempty map of functions');
+    const registered={...handlers};
+    for(const [name,handler] of Object.entries(registered)){
+      validStep(name);if(typeof handler!=='function')throw new Error('handlers must be a nonempty map of functions');
+    }
+    if(!options||!(options.signal instanceof AbortSignal))throw new Error('signal must be an application-owned AbortSignal');
+    const {signal,pollIntervalMs=100,workerId=randomUUID(),onError}=options;
+    safeInteger(pollIntervalMs,'pollIntervalMs',1);
+    if(pollIntervalMs>2_147_483_647)throw new Error('pollIntervalMs exceeds the timer limit');
+    validStep(workerId);
+    if(onError!==undefined&&typeof onError!=='function')throw new Error('onError must be a function');
+    const idle=async()=>{
+      if(signal.aborted)return;
+      await new Promise<void>(resolve=>{
+        const finish=()=>{clearTimeout(timer);signal.removeEventListener('abort',finish);resolve();};
+        const timer=setTimeout(finish,pollIntervalMs);
+        signal.addEventListener('abort',finish,{once:true});
+        if(signal.aborted)finish();
+      });
+    };
+    while(!signal.aborted){
+      let failedTaskId:string|undefined;
+      try{
+        const worked=await this.executeOnce(registered,workerId,id=>{failedTaskId=id;});
+        if(!worked)await idle();
+      }catch(error){
+        if(onError===undefined)throw error;
+        const decision=await onError(error,failedTaskId);
+        if(decision==='propagate')throw error;
+        if(decision!=='continue')throw new Error("onError must return 'continue' or 'propagate'",{cause:error});
+        await idle();
+      }
+    }
+  }
+  private async executeOnce(handlers:Record<string,Handler>,worker:string,recordedFailure?:(taskId:string)=>void):Promise<boolean> {
     const {task}=await this.request('/claim',{worker,handlers:Object.keys(handlers)});
     if(!task) return false;
     if(task.version!==3) throw new Error("unsupported engine protocol version");
@@ -92,7 +163,10 @@ export class Client {
     catch(error) {
       await stop();
       if(ctx.isSuspended)return true;
-      if(!ctx.ownershipError)await ctx.mutate('fail',error instanceof ChildFailed?{error:String(error),terminal:true}:String(error));
+      if(!ctx.ownershipError){
+        await ctx.mutate('fail',error instanceof ChildFailed?{error:String(error),terminal:true}:String(error));
+        recordedFailure?.(task.id);
+      }
       throw error;
     }
     await stop();ctx.checkOwner();await ctx.mutate('complete',output??null);return true;

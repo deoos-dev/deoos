@@ -1,5 +1,7 @@
 # DEOOS - Durable Execution On Object Storage
 
+Ordinary application functions that survive failures, with your choice of deployment and storage, and progress that both people and agents can understand.
+
 One Rust execution core, Python and TypeScript SDKs, and object storage for authoritative state. Two deployment options:
 
 | Mode | What runs | Storage credentials |
@@ -34,7 +36,7 @@ Releases contain an installable Python wheel, npm tarball, optional server execu
 
 ## Library mode
 
-Configure `AWS_BUCKET`, `AWS_REGION`, and AWS credentials in the environment. Temporary credentials need `AWS_SESSION_TOKEN` too. Explicit storage settings can also be passed to Client. Each execution worker uses the same bucket and prefix.
+Configure `DEOOS_STORAGE_PROVIDER` and `DEOOS_STORAGE_BUCKET`, plus your provider's credentials. For AWS S3, set `AWS_REGION`; temporary credentials also need `AWS_SESSION_TOKEN`. Explicit storage settings can also be passed to Client. Each execution worker uses the same bucket and prefix.
 
 AWS S3, RustFS, Cloudflare R2, Google Cloud Storage and Azure Blob Storage are the tested storage backends. R2, GCS and Azure each passed the 32-writer conditional-write contract, all 44 workflow checks and four separate warm-cache test blocks across embedded and shared-server modes using installed macOS ARM64 CI packages for the current SDKs (`90e840e`; Azure used the corrected harness at `b52ebce`). These were local Mac tests against actual cloud storage, with the default 30-second lease and unchanged SDK HTTP timeouts; they do not establish cloud-local performance. Temporary resources and generated credentials were removed. Historical failed attempts remain preserved; earlier Azure timeout causes remain unproven. RustFS is the recommended self-hosted target; distributed deployment and air-gapped operation still need separate qualification. Every supported backend must pass the same execution behavior tests.
 
@@ -68,6 +70,36 @@ await engine.runOnce({greet: async (ctx, inputs) =>
 ```
 
 `run_once`/`runOnce` executes one available task. Your application decides when to poll again. Rust runs inside the worker; no execution server is started.
+
+For a continuous worker, the application supplies its shutdown event or signal:
+
+```python
+import threading
+
+stop = threading.Event()
+engine.run_worker({"greet": greet}, stop_event=stop)
+# Another thread or an application signal handler calls stop.set().
+```
+
+```typescript
+const shutdown = new AbortController();
+await engine.runWorker({greet: async (ctx, inputs) =>
+  ctx.step("greeting", () => `Hello, ${inputs.name}!`)
+}, {signal: shutdown.signal});
+// An application signal handler calls shutdown.abort().
+```
+
+Stopping interrupts idle polling and lets an active handler finish before the loop exits. It does not cancel a durable task or interrupt arbitrary application code. Errors propagate by default. An optional `on_error(error, task_id)` / `onError(error, taskId)` callback must explicitly return `"continue"` or `"propagate"`. A task ID means its failure was successfully recorded, not that the error necessarily originated in application code. The complete examples handle process signals and continue recorded task failures; claim, ownership and terminal-write failures stop the worker.
+
+Use `engine.summary(id)` in either SDK for progress without fetching checkpoint values, inputs or outputs. The Python operator CLI works with the same embedded storage configuration, or with `ENGINE_URL` and `ENGINE_TOKEN` for a shared server:
+
+```sh
+python -m deoos explain greeting-001
+python -m deoos summary greeting-001
+python -m deoos inspect greeting-001
+```
+
+`explain` presents a readable summary, `summary` emits JSON, and `inspect` returns the full stored task. Summaries report persisted status, completed step names, waits and the last retained failure. Failure history is bounded; a prior failure may disappear after manual retry and later history entries. An assigned signal or elapsed timer remains `waiting` until a worker polls. Suggested actions are snapshot hints; mutations still validate current state. Application error messages may contain sensitive information; the summary bounds and cleans their text but does not redact secrets.
 
 ## Shared-server mode
 

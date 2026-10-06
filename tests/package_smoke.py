@@ -245,6 +245,423 @@ def run_workflow_case(mode, first_language, resume_language, python, node,
             "server_restarted": mode == "server"}
 
 
+WORKER_ACCEPTANCE_PYTHON = r'''
+import json, os, threading, time
+from deoos import Client, EngineError
+
+c = (Client.remote(os.environ['ENGINE_URL'], os.environ.get('ENGINE_TOKEN'))
+     if os.environ['DEOOS_MODE'] == 'server' else Client(bucket=os.environ['AWS_BUCKET']))
+passed = []
+secrets = ['INPUT-PAYLOAD-SENTINEL', 'CHECKPOINT-PAYLOAD-SENTINEL',
+           'SIGNAL-PAYLOAD-SENTINEL', 'OUTPUT-PAYLOAD-SENTINEL']
+forbidden = {'inputs', 'output', 'owner', 'token', 'revision', 'generation',
+             'active_incarnation', 'history', 'definitions', 'timers', 'signals',
+             'last_operation', 'last_retry_operation'}
+
+def summary(task_id, status):
+    value = c.summary(task_id)
+    assert value['summary_version'] == 1 and value['id'] == task_id
+    assert value['status'] == status and not forbidden.intersection(value), value
+    assert not any(secret in json.dumps(value) for secret in secrets), value
+    return value
+
+def run(handlers, stop, **options):
+    c.run_worker(handlers, stop_event=stop, **options)
+
+try:
+    # An already stopped worker must leave pending work untouched.
+    c.submit('pre-stopped', 'pre-stopped.v1', {})
+    stopped = threading.Event(); stopped.set()
+    run({'pre-stopped.v1': lambda ctx, inputs: 'unexpected'}, stopped)
+    assert summary('pre-stopped', 'queued')['attempts'] == 0
+    passed.append('already-stopped worker does not claim')
+
+    # Observe an actual empty claim before scheduling stop during the idle wait.
+    assert not c.run_once({'idle.v1': lambda ctx, inputs: None})
+    stopped = threading.Event()
+    real_request = c.request
+    idle_started = []; timers = []; idle_claims = []
+    def observe_empty_claim(path, data=None):
+        value = real_request(path, data)
+        if path == '/claim':
+            idle_claims.append(value['task'])
+            if value['task'] is None and not idle_started:
+                idle_started.append(time.monotonic())
+                timer = threading.Timer(.1, stopped.set)
+                timers.append(timer); timer.start()
+        return value
+    c.request = observe_empty_claim
+    try:
+        run({'idle.v1': lambda ctx, inputs: None}, stopped, poll_interval=30)
+    finally:
+        c.request = real_request
+        for timer in timers:
+            timer.cancel(); timer.join()
+    assert idle_started, 'worker did not return an empty real claim'
+    assert idle_claims == [None] and len(timers) == 1, 'worker polled again instead of waiting idle'
+    idle_seconds = time.monotonic() - idle_started[0]
+    assert stopped.is_set() and idle_seconds < 5, idle_seconds
+    passed.append('idle stop interrupts long poll interval')
+
+    c.submit('drain', 'drain.v1', {})
+    stopped = threading.Event()
+    def drain(ctx, inputs):
+        def active():
+            running = summary('drain', 'running')
+            assert running['attempts'] == 1 and running['wait'] is None
+            assert running['actions'] == ['cancel'] and running['completed_steps'] == []
+            stopped.set()
+            c.submit('after-drain', 'drain.v1', {})
+            time.sleep(.1)
+            return 'drained'
+        return ctx.step('active', active)
+    run({'drain.v1': drain}, stopped)
+    assert c.inspect('drain')['output'] == 'drained'
+    assert summary('drain', 'completed')['completed_steps'] == ['active']
+    assert summary('after-drain', 'queued')['attempts'] == 0
+    passed.append('active stop drains checkpoint and completion without another claim')
+
+    # A single failing attempt is committed before the original exception escapes.
+    def failing_case(task_id, callback=None, replacement=None):
+        c.submit(task_id, task_id + '.v1', {}, max_attempts=1)
+        failure = RuntimeError(task_id + '-boom')
+        seen = []
+        def handler(ctx, inputs):
+            raise failure
+        def on_error(error, recorded_id):
+            assert error is failure and recorded_id == task_id
+            seen.append(recorded_id)
+            if replacement is not None:
+                raise replacement
+            return callback
+        options = {} if callback is None and replacement is None else {'on_error': on_error}
+        try:
+            run({task_id + '.v1': handler}, threading.Event(), **options)
+        except Exception as error:
+            if callback not in (None, 'propagate') and replacement is None:
+                assert isinstance(error, ValueError) and error.__cause__ is failure, error
+            else:
+                assert error is (replacement or failure), error
+        else:
+            raise AssertionError('worker swallowed an error')
+        value = summary(task_id, 'failed')
+        assert value['attempts'] == value['max_attempts'] == 1
+        assert value['actions'] == ['retry'] and task_id + '-boom' in value['last_failure']['message']
+        assert len(seen) == (0 if not options else 1)
+    failing_case('default-error')
+    failing_case('callback-propagate', callback='propagate')
+    failing_case('callback-throws', replacement=RuntimeError('callback-error'))
+    failing_case('callback-invalid', callback='invalid')
+    passed.append('default and callback errors propagate after recorded failure')
+
+    c.submit('ownership-error', 'ownership-error.v1', {})
+    ownership_errors = []
+    def lost_ownership(ctx, inputs):
+        c.cancel(ctx.task['id'])
+        raise RuntimeError('uncommitted-handler-error')
+    def ownership_error(error, task_id):
+        assert isinstance(error, EngineError) and error.status == 409 and task_id is None
+        ownership_errors.append(error)
+        return 'propagate'
+    try:
+        run({'ownership-error.v1': lost_ownership}, threading.Event(), on_error=ownership_error)
+    except EngineError as error:
+        assert ownership_errors == [error]
+    else:
+        raise AssertionError('ownership write failure was swallowed')
+    assert summary('ownership-error', 'cancelled')['actions'] == ['retry']
+    passed.append('failed ownership write has no recorded task failure ID')
+
+    if os.environ['DEOOS_MODE'] == 'server':
+        unauthenticated = Client.remote(os.environ['ENGINE_URL'], 'incorrect-test-token')
+        auth_errors = []
+        def auth_error(error, task_id):
+            assert isinstance(error, EngineError) and error.status == 401 and task_id is None
+            auth_errors.append(error)
+            return 'propagate'
+        try:
+            unauthenticated.run_worker({'auth.v1': lambda ctx, inputs: None},
+                                       stop_event=threading.Event(), on_error=auth_error)
+        except EngineError as error:
+            assert auth_errors == [error]
+        else:
+            raise AssertionError('authentication failure was swallowed')
+        finally:
+            unauthenticated.close()
+        passed.append('authentication failure has no recorded task failure ID')
+
+    # Manual retry clears current error but retained history still describes failure.
+    failed = c.inspect('default-error')
+    c.retry('default-error', failed['revision'], 'acceptance-retry')
+    assert c.inspect('default-error')['error'] is None
+    retried = summary('default-error', 'queued')
+    assert 'default-error-boom' in retried['last_failure']['message']
+    assert retried['last_failure']['at_ms'] is not None
+    passed.append('manual retry keeps historical failure summary')
+
+    c.submit('continue', 'continue.v1', {}, max_attempts=2)
+    stopped = threading.Event(); calls = []; errors = []
+    def continue_handler(ctx, inputs):
+        def effect():
+            calls.append('effect')
+            if len(calls) == 1:
+                raise RuntimeError('transient-boom')
+            return 'recovered'
+        result = ctx.step('effect', effect)
+        stopped.set()
+        return result
+    def continue_error(error, task_id):
+        assert 'transient-boom' in str(error) and task_id == 'continue'
+        errors.append(task_id)
+        return 'continue'
+    run({'continue.v1': continue_handler}, stopped, poll_interval=.01, on_error=continue_error)
+    recovered = summary('continue', 'completed')
+    assert len(calls) == 2 and errors == ['continue']
+    assert recovered['attempts'] == 2 and recovered['completed_steps'] == ['effect']
+    assert 'transient-boom' in recovered['last_failure']['message']
+    passed.append('explicit continue recovers and retains historical failure')
+
+    c.submit('approval', 'approval.v1', {'private': secrets[0]})
+    queued = summary('approval', 'queued')
+    assert queued['wait'] is None and queued['actions'] == ['cancel']
+    def approval(ctx, inputs):
+        ctx.step('before', lambda: secrets[1])
+        ctx.wait_signal('approved')
+        return secrets[3]
+    assert c.run_once({'approval.v1': approval})
+    waiting = summary('approval', 'waiting')
+    assert waiting['wait'] == {'kind': 'signal', 'name': 'approved', 'assigned': False}
+    assert waiting['completed_steps'] == ['before'] and waiting['actions'] == ['cancel', 'signal']
+    c.signal('approval', 'approved', {'private': secrets[2]})
+    assigned = summary('approval', 'waiting')
+    assert assigned['wait']['assigned'] is True and assigned['actions'] == ['cancel']
+    assert c.run_once({'approval.v1': approval})
+    completed = summary('approval', 'completed')
+    assert completed['wait'] is None and completed['actions'] == []
+    assert completed['completed_steps'] == ['approved', 'before']
+    assert c.inspect('approval')['output'] == secrets[3], 'raw inspect changed'
+    passed.append('queued/waiting/assigned/completed summaries omit payloads and tokens')
+    print(json.dumps({'checks': passed, 'idle_seconds': idle_seconds}))
+finally:
+    c.close()
+'''
+
+
+WORKER_ACCEPTANCE_TYPESCRIPT = r'''
+import assert from 'node:assert/strict';
+import {setTimeout as delay} from 'node:timers/promises';
+import {performance} from 'node:perf_hooks';
+import {Client, EngineError} from 'deoos';
+
+const c = process.env.DEOOS_MODE === 'server'
+  ? Client.remote(process.env.ENGINE_URL, process.env.ENGINE_TOKEN)
+  : new Client({bucket: process.env.AWS_BUCKET});
+const passed = [];
+const secrets = ['INPUT-PAYLOAD-SENTINEL', 'CHECKPOINT-PAYLOAD-SENTINEL',
+  'SIGNAL-PAYLOAD-SENTINEL', 'OUTPUT-PAYLOAD-SENTINEL'];
+const forbidden = ['inputs', 'output', 'owner', 'token', 'revision', 'generation',
+  'active_incarnation', 'history', 'definitions', 'timers', 'signals',
+  'last_operation', 'last_retry_operation'];
+async function summary(id, status) {
+  const value = await c.summary(id);
+  assert.equal(value.summary_version, 1); assert.equal(value.id, id);
+  assert.equal(value.status, status);
+  assert(forbidden.every(key => !Object.hasOwn(value, key)));
+  assert(secrets.every(secret => !JSON.stringify(value).includes(secret)));
+  return value;
+}
+const run = (handlers, stop, options = {}) => c.runWorker(handlers, {signal: stop.signal, ...options});
+
+await c.submit('pre-stopped', 'pre-stopped.v1', {});
+let stop = new AbortController(); stop.abort();
+await run({'pre-stopped.v1': () => 'unexpected'}, stop);
+assert.equal((await summary('pre-stopped', 'queued')).attempts, 0);
+passed.push('already-stopped worker does not claim');
+
+assert.equal(await c.runOnce({'idle.v1': () => null}), false);
+stop = new AbortController();
+const idleStop = stop;
+const realRequest = c.request;
+let idleStarted, idleTimer, idleTimerStarts = 0;
+const idleClaims = [];
+c.request = async function(path, data) {
+  const value = await realRequest.call(c, path, data);
+  if (path === '/claim') {
+    idleClaims.push(value.task);
+    if (value.task === null && idleStarted === undefined) {
+      idleStarted = performance.now(); idleTimerStarts += 1;
+      idleTimer = setTimeout(() => idleStop.abort(), 100);
+    }
+  }
+  return value;
+};
+try { await run({'idle.v1': () => null}, stop, {pollIntervalMs: 30000}); }
+finally { c.request = realRequest; clearTimeout(idleTimer); }
+assert.notEqual(idleStarted, undefined, 'worker did not return an empty real claim');
+assert.deepEqual(idleClaims, [null], 'worker polled again instead of waiting idle');
+assert.equal(idleTimerStarts, 1);
+const idle_seconds = (performance.now() - idleStarted) / 1000;
+assert(stop.signal.aborted && idle_seconds < 5, String(idle_seconds));
+passed.push('idle stop interrupts long poll interval');
+
+await c.submit('drain', 'drain.v1', {});
+stop = new AbortController();
+await run({'drain.v1': ctx => ctx.step('active', async () => {
+  const running = await summary('drain', 'running');
+  assert.equal(running.attempts, 1); assert.equal(running.wait, null);
+  assert.deepEqual(running.actions, ['cancel']); assert.deepEqual(running.completed_steps, []);
+  stop.abort(); await c.submit('after-drain', 'drain.v1', {});
+  await delay(100); return 'drained';
+})}, stop);
+assert.equal((await c.inspect('drain')).output, 'drained');
+assert.deepEqual((await summary('drain', 'completed')).completed_steps, ['active']);
+assert.equal((await summary('after-drain', 'queued')).attempts, 0);
+passed.push('active stop drains checkpoint and completion without another claim');
+
+async function failingCase(id, decision, replacement) {
+  await c.submit(id, id + '.v1', {}, 1);
+  const failure = new Error(id + '-boom'); const seen = [];
+  const options = decision === undefined && replacement === undefined ? {} : {
+    onError: (error, taskId) => {
+      assert.equal(error, failure); assert.equal(taskId, id); seen.push(taskId);
+      if (replacement) throw replacement;
+      return decision;
+    },
+  };
+  await assert.rejects(run({[id + '.v1']: () => {throw failure;}}, new AbortController(), options),
+    error => decision !== undefined && decision !== 'propagate' && replacement === undefined
+      ? error.cause === failure && error.message.includes('onError must return')
+      : error === (replacement ?? failure));
+  const value = await summary(id, 'failed');
+  assert.equal(value.attempts, 1); assert.equal(value.max_attempts, 1);
+  assert.deepEqual(value.actions, ['retry']); assert(value.last_failure.message.includes(id + '-boom'));
+  assert.equal(seen.length, Object.keys(options).length ? 1 : 0);
+}
+await failingCase('default-error');
+await failingCase('callback-propagate', 'propagate');
+await failingCase('callback-throws', undefined, new Error('callback-error'));
+await failingCase('callback-invalid', 'invalid');
+passed.push('default and callback errors propagate after recorded failure');
+
+await c.submit('ownership-error', 'ownership-error.v1', {});
+const ownershipErrors = [];
+await assert.rejects(run({'ownership-error.v1': async ctx => {
+  await c.cancel(ctx.task.id); throw new Error('uncommitted-handler-error');
+}}, new AbortController(), {onError: (error, taskId) => {
+  assert(error instanceof EngineError); assert.equal(error.status, 409); assert.equal(taskId, undefined);
+  ownershipErrors.push(error); return 'propagate';
+}}), error => ownershipErrors.length === 1 && ownershipErrors[0] === error);
+assert.deepEqual((await summary('ownership-error', 'cancelled')).actions, ['retry']);
+passed.push('failed ownership write has no recorded task failure ID');
+
+if (process.env.DEOOS_MODE === 'server') {
+  const unauthenticated = Client.remote(process.env.ENGINE_URL, 'incorrect-test-token');
+  const authErrors = [];
+  await assert.rejects(unauthenticated.runWorker({'auth.v1': () => null}, {
+    signal: new AbortController().signal, onError: (error, taskId) => {
+      assert(error instanceof EngineError); assert.equal(error.status, 401); assert.equal(taskId, undefined);
+      authErrors.push(error); return 'propagate';
+    },
+  }), error => authErrors.length === 1 && authErrors[0] === error);
+  passed.push('authentication failure has no recorded task failure ID');
+}
+
+const failed = await c.inspect('default-error');
+await c.retry('default-error', failed.revision, 'acceptance-retry');
+assert.equal((await c.inspect('default-error')).error, null);
+const retried = await summary('default-error', 'queued');
+assert(retried.last_failure.message.includes('default-error-boom'));
+assert.notEqual(retried.last_failure.at_ms, null);
+passed.push('manual retry keeps historical failure summary');
+
+await c.submit('continue', 'continue.v1', {}, 2);
+stop = new AbortController(); const calls = []; const errors = [];
+await run({'continue.v1': async ctx => {
+  const result = await ctx.step('effect', () => {
+    calls.push('effect'); if (calls.length === 1) throw new Error('transient-boom');
+    return 'recovered';
+  });
+  stop.abort(); return result;
+}}, stop, {pollIntervalMs: 10, onError: (error, taskId) => {
+  assert(String(error).includes('transient-boom')); assert.equal(taskId, 'continue');
+  errors.push(taskId); return 'continue';
+}});
+const recovered = await summary('continue', 'completed');
+assert.equal(calls.length, 2); assert.deepEqual(errors, ['continue']);
+assert.equal(recovered.attempts, 2); assert.deepEqual(recovered.completed_steps, ['effect']);
+assert(recovered.last_failure.message.includes('transient-boom'));
+passed.push('explicit continue recovers and retains historical failure');
+
+await c.submit('approval', 'approval.v1', {private: secrets[0]});
+const queued = await summary('approval', 'queued');
+assert.equal(queued.wait, null); assert.deepEqual(queued.actions, ['cancel']);
+const approval = async ctx => {
+  await ctx.step('before', () => secrets[1]); await ctx.waitSignal('approved'); return secrets[3];
+};
+assert.equal(await c.runOnce({'approval.v1': approval}), true);
+const waiting = await summary('approval', 'waiting');
+assert.deepEqual(waiting.wait, {kind: 'signal', name: 'approved', assigned: false});
+assert.deepEqual(waiting.completed_steps, ['before']); assert.deepEqual(waiting.actions, ['cancel', 'signal']);
+await c.signal('approval', 'approved', {private: secrets[2]});
+const assigned = await summary('approval', 'waiting');
+assert.equal(assigned.wait.assigned, true); assert.deepEqual(assigned.actions, ['cancel']);
+assert.equal(await c.runOnce({'approval.v1': approval}), true);
+const completed = await summary('approval', 'completed');
+assert.equal(completed.wait, null); assert.deepEqual(completed.actions, []);
+assert.deepEqual(completed.completed_steps, ['approved', 'before']);
+assert.equal((await c.inspect('approval')).output, secrets[3], 'raw inspect changed');
+passed.push('queued/waiting/assigned/completed summaries omit payloads and tokens');
+console.log(JSON.stringify({checks: passed, idle_seconds}));
+'''
+
+
+def run_worker_case(mode, language, python, node, work, package, root_env, processes):
+    """Exercise public worker/summary APIs using only the freshly installed packages."""
+    env = dict(root_env, DEOOS_MODE=mode,
+               EXECUTION_PREFIX=f"worker-smoke-{mode}-{language}-{uuid.uuid4().hex}")
+    server = None
+    if mode == "server":
+        listen_port = port()
+        env.update(ENGINE_BIND=f"127.0.0.1:{listen_port}",
+                   ENGINE_URL=f"http://127.0.0.1:{listen_port}", ENGINE_TOKEN="worker-smoke-token")
+        binary = package / "bin" / ("deoos-server.exe" if os.name == "nt" else "deoos-server")
+        server = subprocess.Popen([str(binary)], cwd=work, env=env,
+                                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        processes.append((server, "worker acceptance server"))
+        wait_server(server, env["ENGINE_URL"])
+        env = {key: value for key, value in env.items()
+               if not key.startswith("AWS_") and key not in {
+                   "EXECUTION_PREFIX", "DEOOS_NATIVE_LIBRARY", "DEOOS_NODE_LIBRARY",
+               }}
+    else:
+        for key in ("ENGINE_URL", "ENGINE_TOKEN", "ENGINE_BIND"):
+            env.pop(key, None)
+    script = work / ("worker_acceptance.py" if language == "python" else "worker_acceptance.mjs")
+    script.write_text(WORKER_ACCEPTANCE_PYTHON if language == "python"
+                      else WORKER_ACCEPTANCE_TYPESCRIPT)
+    try:
+        result = command([python if language == "python" else node, str(script)],
+                         cwd=work, env=env, timeout=180)
+        checks = json.loads(result.stdout)
+        cli_summary = command([python, "-m", "deoos", "summary", "approval"],
+                              cwd=work, env=env)
+        value = json.loads(cli_summary.stdout)
+        assert value["summary_version"] == 1 and value["id"] == "approval"
+        assert value["status"] == "completed" and value["completed_steps"] == ["approved", "before"]
+        assert not {"inputs", "output", "token", "owner", "history"}.intersection(value)
+        cli_explain = command([python, "-m", "deoos", "explain", "approval"],
+                              cwd=work, env=env)
+        assert "approval: completed" in cli_explain.stdout
+        assert "Completed steps:" in cli_explain.stdout and "Suggested actions:" in cli_explain.stdout
+        for output in (cli_summary.stdout, cli_explain.stdout):
+            assert "PAYLOAD-SENTINEL" not in output, output
+        checks["checks"].append("installed operator CLI JSON summary and human explanation omit payloads")
+        return {"mode": mode, "language": language, **checks}
+    finally:
+        if server is not None:
+            stop_process(server, "worker acceptance server")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("release", nargs="?", type=pathlib.Path,
@@ -321,7 +738,7 @@ def main():
                           aws_secret_access_key=env["AWS_SECRET_ACCESS_KEY"])
     env["AWS_BUCKET"] = bucket
     report = {"backend": args.backend, "release": str(package), "release_hashes": release_hashes,
-              "server_version": server_version, "modes": [], "cleaned": False,
+              "server_version": server_version, "modes": [], "worker_api": [], "cleaned": False,
               "cleanup_errors": [], "bucket": bucket,
               "aws_identity": {"account": caller_identity["Account"], "arn": caller_identity["Arn"]}
                               if caller_identity else None}
@@ -366,6 +783,10 @@ def main():
                         report["modes"].append(run_workflow_case(
                             mode, first, second, python, node, work_examples, package,
                             env, processes, report["runtime"],
+                        ))
+                    for language in ("python", "typescript"):
+                        report["worker_api"].append(run_worker_case(
+                            mode, language, python, node, work, package, env, processes,
                         ))
             finally:
                 for process, label in reversed(processes):
