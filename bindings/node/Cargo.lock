@@ -233,9 +233,11 @@ checksum = "914a755b7c2d4af2bdcff7ce1739e2db9a1b81a9b07123d8015786ae03c0980d"
 name = "deoos-engine"
 version = "0.6.0"
 dependencies = [
+ "async-trait",
  "axum",
  "bytes",
  "futures",
+ "libc",
  "object_store",
  "serde",
  "serde_json",

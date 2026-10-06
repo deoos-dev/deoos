@@ -21,7 +21,11 @@ use uuid::Uuid;
 const PROTOCOL_VERSION: u32 = 3;
 mod active;
 mod discovery;
+mod local;
 mod qualification;
+// Keep a failed filesystem durability barrier distinguishable after API-error
+// conversion, so an outer operation cannot acknowledge it through readback.
+const DURABILITY_FAILURE: StatusCode = StatusCode::INSUFFICIENT_STORAGE;
 
 #[derive(Clone)]
 pub struct Engine {
@@ -213,6 +217,10 @@ fn normalized_json(value: Value) -> Value {
     }
 }
 fn storage(err: object_store::Error) -> (StatusCode, String) {
+    if local::is_durability_error(&err) {
+        eprintln!("storage: local durability barrier failed");
+        return (DURABILITY_FAILURE, "local durability barrier failed; operation outcome uncertain; check disk space, filesystem support and write permissions".into());
+    }
     match err {
         object_store::Error::NotFound { .. } => (StatusCode::NOT_FOUND, "not found".into()),
         object_store::Error::Precondition { .. } | object_store::Error::AlreadyExists { .. } => {
@@ -274,6 +282,9 @@ impl Engine {
                 Ok(())
             }
             Err(err) => {
+                if local::is_durability_error(&err) {
+                    return Err(storage(err));
+                }
                 // Reconcile an uncertain response. A revision is unique to this exact proposed write.
                 if let Ok((actual, _)) = self.read(&t.id).await
                     && actual.revision == t.revision
@@ -365,6 +376,9 @@ impl Engine {
             match self.write(&task, PutMode::Update(version)).await {
                 Ok(()) => return Ok(Json(task)),
                 Err(error) => {
+                    if error.0 == DURABILITY_FAILURE {
+                        return Err(error);
+                    }
                     if let Ok((actual, _)) = self.read(id).await
                         && actual.last_retry_operation.as_deref() == Some(&request.operation_id)
                     {
@@ -461,6 +475,9 @@ impl Engine {
                     )
                     .await
                 {
+                    if local::is_durability_error(&error) {
+                        return Err(storage(error));
+                    }
                     match self.payload(result_key.as_ref()).await {
                         Ok(existing) => {
                             if normalized_json(existing) != normalized_json(request.value.clone()) {
@@ -481,6 +498,9 @@ impl Engine {
                 Ok(()) => return Ok(Json(task)),
                 Err(error) => {
                     // A heartbeat may supersede the acknowledged revision after a lost response.
+                    if error.0 == DURABILITY_FAILURE {
+                        return Err(error);
+                    }
                     if let Ok((actual, _)) = self.read(id).await
                         && actual
                             .signals
@@ -944,12 +964,11 @@ fn execution_summary(t: &Task) -> Value {
         "failed" | "cancelled" => actions.push("retry"),
         _ => {}
     }
-    if t.status == "waiting" {
-        if let Some(WaitCondition::Signal { name }) = &t.waiting_on {
-            if !t.signals.contains_key(name) {
-                actions.push("signal");
-            }
-        }
+    if t.status == "waiting"
+        && let Some(WaitCondition::Signal { name }) = &t.waiting_on
+        && !t.signals.contains_key(name)
+    {
+        actions.push("signal");
     }
     json!({"summary_version":1, "id":t.id, "handler":t.handler, "status":t.status,
         "attempts":t.attempts, "max_attempts":t.max_attempts,
@@ -981,7 +1000,9 @@ async fn result(
 #[derive(Deserialize)]
 pub struct Config {
     pub provider: Option<String>,
+    #[serde(default)]
     pub bucket: String,
+    pub directory: Option<String>,
     pub prefix: Option<String>,
     pub region: Option<String>,
     pub endpoint: Option<String>,
@@ -998,7 +1019,34 @@ impl Engine {
             .or_else(|| std::env::var("DEOOS_STORAGE_PROVIDER").ok())
             .unwrap_or_else(|| "s3".into());
         let store: Arc<dyn ObjectStore> = match provider.as_str() {
+            "filesystem" => {
+                if !c.bucket.is_empty()
+                    || c.region.is_some()
+                    || c.endpoint.is_some()
+                    || c.access_key_id.is_some()
+                    || c.secret_access_key.is_some()
+                    || c.session_token.is_some()
+                    || c.allow_http.is_some()
+                {
+                    return Err("filesystem storage uses directory, not bucket or cloud credential/endpoint options".into());
+                }
+                let directory = c
+                    .directory
+                    .or_else(|| std::env::var("DEOOS_STORAGE_DIRECTORY").ok())
+                    .filter(|value| !value.is_empty())
+                    .ok_or("filesystem storage requires directory or DEOOS_STORAGE_DIRECTORY")?;
+                let absolute = std::path::absolute(directory)
+                    .map_err(|_| "invalid local storage directory")?;
+                Arc::new(
+                    local::LocalObjectStore::new(absolute).map_err(|error| {
+                        format!("cannot initialize filesystem storage: {error}")
+                    })?,
+                )
+            }
             "s3" => {
+                if c.directory.is_some() {
+                    return Err("directory requires provider=filesystem".into());
+                }
                 let mut builder = AmazonS3Builder::from_env().with_bucket_name(c.bucket);
                 if let Some(v) = c.region {
                     builder = builder.with_region(v);
@@ -1023,6 +1071,9 @@ impl Engine {
                 )?)
             }
             "gcs" | "azure" => {
+                if c.directory.is_some() {
+                    return Err("directory requires provider=filesystem".into());
+                }
                 if c.region.is_some()
                     || c.access_key_id.is_some()
                     || c.secret_access_key.is_some()
@@ -1055,7 +1106,7 @@ impl Engine {
                     Arc::new(builder.build().map_err(|_| "invalid Azure configuration; check account, container, endpoint and native provider credentials")?)
                 }
             }
-            _ => return Err("provider must be s3, gcs or azure".into()),
+            _ => return Err("provider must be s3, gcs, azure or filesystem".into()),
         };
         let lease_ms = c.lease_ms.unwrap_or(30000);
         if lease_ms < 1000 {
@@ -1083,18 +1134,28 @@ impl Engine {
     }
     pub fn from_env() -> Result<Self, String> {
         let provider = std::env::var("DEOOS_STORAGE_PROVIDER").unwrap_or_else(|_| "s3".into());
-        let bucket = std::env::var("DEOOS_STORAGE_BUCKET")
-            .or_else(|error| {
-                if provider == "s3" {
-                    std::env::var("AWS_BUCKET")
-                } else {
-                    Err(error)
-                }
-            })
-            .map_err(|_| "DEOOS_STORAGE_BUCKET (or AWS_BUCKET for S3) required")?;
+        let bucket = if provider == "filesystem" {
+            String::new()
+        } else {
+            std::env::var("DEOOS_STORAGE_BUCKET")
+                .or_else(|error| {
+                    if provider == "s3" {
+                        std::env::var("AWS_BUCKET")
+                    } else {
+                        Err(error)
+                    }
+                })
+                .map_err(|_| "DEOOS_STORAGE_BUCKET (or AWS_BUCKET for S3) required")?
+        };
+        let directory = if provider == "filesystem" {
+            std::env::var("DEOOS_STORAGE_DIRECTORY").ok()
+        } else {
+            None
+        };
         Self::from_config(Config {
             provider: Some(provider),
             bucket,
+            directory,
             prefix: std::env::var("EXECUTION_PREFIX").ok(),
             region: None,
             endpoint: None,

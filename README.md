@@ -127,6 +127,28 @@ Handler registration, submission and checkpoint APIs are identical in both modes
 
 The Windows server executable is `bin/deoos-server.exe`. Set the same configuration variables in PowerShell using `$env:AWS_BUCKET = "my-workflows"` and the other variables above, then invoke that executable. The Windows native artifacts link the C runtime statically; their inspected DLL imports are operating-system libraries.
 
+## Single-machine storage
+
+The experimental filesystem adapter uses a private directory instead of cloud storage. It currently accepts only macOS Apple Silicon on a local APFS volume. Cloud storage remains available on the other release targets. Use one host; network mounts and synchronizing the directory between machines are outside this adapter's contract.
+
+```python
+with Client(provider="filesystem", directory="./deoos-state") as engine:
+    engine.submit("local-greeting", "greet", {"name": "World"})
+    engine.run_once({"greet": greet})
+```
+
+```typescript
+const engine = new Client({provider: "filesystem", directory: "./deoos-state"});
+await engine.submit("local-greeting", "greet", {name: "World"});
+await engine.runOnce({greet: async (ctx, inputs) =>
+  ctx.step("greeting", () => `Hello, ${inputs.name}!`)
+});
+```
+
+For a server or the operator CLI, set `DEOOS_STORAGE_PROVIDER=filesystem` and `DEOOS_STORAGE_DIRECTORY=/absolute/path/to/deoos-state`. The adapter creates its directory with private permissions; an existing root must belong to the running user and have no group or other permissions. Paths containing symlinks are rejected. Keep the directory, its objects and its lock files together; never remove lock files while any client is running. Checkpoints and task ownership use atomic file replacement, fresh version tokens and locks shared across processes. Task state and payload writes are synced before successful acknowledgments. Cleanup of an active discovery marker after a durable terminal-state commit is best effort and may be deferred. A durability-barrier failure returns HTTP/API status 507 with an uncertain-outcome error; it is never converted into success by reading the file back.
+
+On Apple Silicon, run `make setup` once, then `make test-filesystem` for developer qualification. It installs fresh packages, tests both SDKs and modes, races independent processes, and injects process kills and a one-shot directory-sync failure through a test-only interposer. These tests establish process recovery and failure reporting; they are not a physical power-loss test. The same package suite against RustFS checks the S3-compatible path. Evidence stays outside the repository in `../outputs/evidence`.
+
 ## Composed workflows
 
 ```python

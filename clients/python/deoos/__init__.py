@@ -46,10 +46,19 @@ class Client:
             from .native import NativeEngine
             import os
             provider = config.get("provider") or os.environ.get("DEOOS_STORAGE_PROVIDER", "s3")
-            config["bucket"] = bucket or os.environ.get("DEOOS_STORAGE_BUCKET") or (
-                os.environ.get("AWS_BUCKET") if provider == "s3" else None)
-            if not config["bucket"]:
-                raise ValueError("bucket is required for library mode")
+            config["provider"] = provider
+            if provider == "filesystem":
+                if bucket is not None:
+                    raise ValueError("filesystem storage uses directory, not bucket")
+                directory = config.get("directory") or os.environ.get("DEOOS_STORAGE_DIRECTORY")
+                if not directory:
+                    raise ValueError("filesystem storage requires directory or DEOOS_STORAGE_DIRECTORY")
+                config["directory"] = os.fspath(directory)
+            else:
+                config["bucket"] = bucket or os.environ.get("DEOOS_STORAGE_BUCKET") or (
+                    os.environ.get("AWS_BUCKET") if provider == "s3" else None)
+                if not config["bucket"]:
+                    raise ValueError("bucket or DEOOS_STORAGE_BUCKET is required for library mode")
             config["prefix"] = prefix or os.environ.get("EXECUTION_PREFIX", "durable-v3")
             if "lease_ms" not in config and "LEASE_MS" in os.environ:
                 config["lease_ms"] = int(os.environ["LEASE_MS"])

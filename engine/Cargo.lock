@@ -218,9 +218,11 @@ dependencies = [
 name = "deoos-engine"
 version = "0.6.0"
 dependencies = [
+ "async-trait",
  "axum",
  "bytes",
  "futures",
+ "libc",
  "object_store",
  "serde",
  "serde_json",

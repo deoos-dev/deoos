@@ -35,8 +35,13 @@ function createClient() {
   }
   if (mode === 'library') {
     const provider = process.env.DEOOS_STORAGE_PROVIDER ?? 's3';
+    if (provider === 'filesystem') {
+      if (!process.env.DEOOS_STORAGE_DIRECTORY) throw new Error('filesystem storage requires DEOOS_STORAGE_DIRECTORY');
+      return new Client({provider, directory: process.env.DEOOS_STORAGE_DIRECTORY,
+        prefix: process.env.EXECUTION_PREFIX ?? 'durable-v3'});
+    }
     if (!['s3', 'gcs', 'azure'].includes(provider)) {
-      throw new Error("DEOOS_STORAGE_PROVIDER must be 's3', 'gcs', or 'azure'");
+      throw new Error("DEOOS_STORAGE_PROVIDER must be 's3', 'gcs', 'azure', or 'filesystem'");
     }
     const bucket = process.env.DEOOS_STORAGE_BUCKET || (provider === 's3' ? process.env.AWS_BUCKET : undefined);
     if (!bucket) throw new Error('DEOOS_STORAGE_BUCKET is required in library mode (AWS_BUCKET is an S3 fallback)');

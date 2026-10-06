@@ -86,6 +86,9 @@ impl Engine {
             Ok(_) => Ok(()),
             Err(error) => {
                 // Lost responses may hide a successful create. Never overwrite/recreate this key.
+                if local::is_durability_error(&error) {
+                    return Err(storage(error));
+                }
                 if let Ok(result) = self.store.get(&key).await
                     && let Ok(actual) = result.bytes().await
                     && actual.as_ref() == bytes.as_slice()
@@ -305,6 +308,9 @@ impl Engine {
             Ok(_) => {}
             Err(error) => {
                 // Another initializer or a lost response may have completed this scan.
+                if local::is_durability_error(&error) {
+                    return Err(storage(error));
+                }
                 let result = self
                     .store
                     .get(&sentinel)

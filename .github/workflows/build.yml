@@ -174,6 +174,12 @@ jobs:
           rustup override set "$RUST_VERSION"
           python packaging/build_package.py
           python packaging/ci.py verify "${{ matrix.target }}"
+      - name: Test installed packages and filesystem crash recovery on Apple Silicon
+        if: matrix.target == 'macos-arm64'
+        timeout-minutes: 15
+        run: |
+          python tests/package_smoke.py --backend filesystem
+          python tests/local_faults.py --binary engine/target/release/deoos-engine
       - name: Validate required AWS account configuration
         run: python packaging/ci.py account-config
       - name: Obtain short-lived credentials for the configured test account

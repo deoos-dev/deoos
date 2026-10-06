@@ -128,6 +128,9 @@ async fn write(e: &Engine, schedule: &Schedule, mode: PutMode) -> Result<(), Err
     {
         Ok(_) => Ok(()),
         Err(error) => {
+            if local::is_durability_error(&error) {
+                return Err(storage(error));
+            }
             if let Ok((actual, _)) = read(e, &schedule.id).await
                 && actual.revision == schedule.revision
             {

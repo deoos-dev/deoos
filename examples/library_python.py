@@ -1,7 +1,7 @@
 """No engine process or localhost configuration: Rust runs in this Python process."""
-import os,sys,uuid
+import sys,uuid
 from deoos import Client
-engine=Client(bucket=os.environ['AWS_BUCKET'],prefix=os.environ.get('EXECUTION_PREFIX','durable-v3'))
+engine=Client()
 def greet(ctx,inputs):
     return ctx.step('greeting',lambda:f"Hello, {inputs['name']}!")
 task_id=sys.argv[1] if len(sys.argv)>1 else 'greet-'+uuid.uuid4().hex

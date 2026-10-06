@@ -15,9 +15,6 @@ import uuid
 import venv
 import zipfile
 
-import boto3
-from botocore.exceptions import ClientError
-
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 MAX_SAFE_INTEGER = 9_007_199_254_740_991
 
@@ -87,11 +84,21 @@ def inspect(python, script, task_id, env, cwd):
     return json.loads(result.stdout)
 
 
+def remote_environment(env):
+    """Remote SDKs must work without direct access to the server's storage."""
+    result = {key: value for key, value in env.items()
+              if not key.startswith(("AWS_", "DEOOS_STORAGE_")) and key not in {
+                  "EXECUTION_PREFIX", "DEOOS_NATIVE_LIBRARY", "DEOOS_NODE_LIBRARY",
+              }}
+    assert not any(key.startswith(("AWS_", "DEOOS_STORAGE_")) for key in result)
+    return result
+
+
 def runtime_info(mode, python, node, env, cwd, server_pid):
     python_probe = (
         "import json,os,platform,sys; from deoos import Client; "
         "c=Client.remote(os.environ['ENGINE_URL'],os.environ.get('ENGINE_TOKEN')) "
-        "if os.environ['DEOOS_MODE']=='server' else Client(bucket=os.environ['AWS_BUCKET']); "
+        "if os.environ['DEOOS_MODE']=='server' else Client(); "
         "i=c.request('/info'); print(json.dumps({'system':platform.system(),'machine':platform.machine(),"
         "'version':platform.python_version(),'executable':sys.executable,'client_pid':os.getpid(),"
         "'engine_pid':i['process_id']})); c.close()"
@@ -100,7 +107,9 @@ def runtime_info(mode, python, node, env, cwd, server_pid):
     node_probe = (
         "import {Client} from 'deoos'; const c=process.env.DEOOS_MODE==='server' "
         "?Client.remote(process.env.ENGINE_URL,process.env.ENGINE_TOKEN) "
-        ":new Client({bucket:process.env.AWS_BUCKET}); const i=await c.request('/info'); "
+        ":new Client(process.env.DEOOS_STORAGE_PROVIDER==='filesystem' "
+        "?{provider:'filesystem',directory:process.env.DEOOS_STORAGE_DIRECTORY}:"
+        "{bucket:process.env.AWS_BUCKET}); const i=await c.request('/info'); "
         "console.log(JSON.stringify({platform:process.platform,arch:process.arch,"
         "version:process.version,client_pid:process.pid,engine_pid:i.process_id}));"
     )
@@ -150,12 +159,7 @@ def run_workflow_case(mode, first_language, resume_language, python, node,
             env.pop(key, None)
     worker_env = dict(env)
     if mode == "server":
-        for key in list(worker_env):
-            if key.startswith("AWS_") or key in {
-                "EXECUTION_PREFIX", "DEOOS_NATIVE_LIBRARY", "DEOOS_NODE_LIBRARY",
-            }:
-                worker_env.pop(key)
-        assert not any(key.startswith("AWS_") for key in worker_env)
+        worker_env = remote_environment(worker_env)
 
     server = None
 
@@ -250,7 +254,7 @@ import json, os, threading, time
 from deoos import Client, EngineError
 
 c = (Client.remote(os.environ['ENGINE_URL'], os.environ.get('ENGINE_TOKEN'))
-     if os.environ['DEOOS_MODE'] == 'server' else Client(bucket=os.environ['AWS_BUCKET']))
+     if os.environ['DEOOS_MODE'] == 'server' else Client())
 passed = []
 secrets = ['INPUT-PAYLOAD-SENTINEL', 'CHECKPOINT-PAYLOAD-SENTINEL',
            'SIGNAL-PAYLOAD-SENTINEL', 'OUTPUT-PAYLOAD-SENTINEL']
@@ -455,7 +459,9 @@ import {Client, EngineError} from 'deoos';
 
 const c = process.env.DEOOS_MODE === 'server'
   ? Client.remote(process.env.ENGINE_URL, process.env.ENGINE_TOKEN)
-  : new Client({bucket: process.env.AWS_BUCKET});
+  : new Client(process.env.DEOOS_STORAGE_PROVIDER === 'filesystem'
+    ? {provider: 'filesystem', directory: process.env.DEOOS_STORAGE_DIRECTORY}
+    : {bucket: process.env.AWS_BUCKET});
 const passed = [];
 const secrets = ['INPUT-PAYLOAD-SENTINEL', 'CHECKPOINT-PAYLOAD-SENTINEL',
   'SIGNAL-PAYLOAD-SENTINEL', 'OUTPUT-PAYLOAD-SENTINEL'];
@@ -629,10 +635,7 @@ def run_worker_case(mode, language, python, node, work, package, root_env, proce
                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         processes.append((server, "worker acceptance server"))
         wait_server(server, env["ENGINE_URL"])
-        env = {key: value for key, value in env.items()
-               if not key.startswith("AWS_") and key not in {
-                   "EXECUTION_PREFIX", "DEOOS_NATIVE_LIBRARY", "DEOOS_NODE_LIBRARY",
-               }}
+        env = remote_environment(env)
     else:
         for key in ("ENGINE_URL", "ENGINE_TOKEN", "ENGINE_BIND"):
             env.pop(key, None)
@@ -666,7 +669,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("release", nargs="?", type=pathlib.Path,
                         help="release directory (defaults to this host's packaged release)")
-    parser.add_argument("--backend", choices=("rustfs", "aws"), default="rustfs")
+    parser.add_argument("--backend", choices=("rustfs", "aws", "filesystem"), default="rustfs")
     parser.add_argument("--aws-profile", default=os.environ.get("AWS_PROFILE", "auto"),
                         help="AWS profile, or 'auto' for environment/instance credentials")
     args = parser.parse_args()
@@ -702,12 +705,30 @@ def main():
                  "library_typescript.mjs", "server_python.py", "server_typescript.mjs"):
         assert (examples / name).is_file(), f"missing packaged workflow example: {name}"
 
-    bucket = os.environ.get("DEOOS_TEST_BUCKET_PREFIX", "deoos-smoke-") + uuid.uuid4().hex[:20]
-    assert len(bucket) <= 63, "test bucket prefix is too long"
+    bucket = None if args.backend == "filesystem" else (
+        os.environ.get("DEOOS_TEST_BUCKET_PREFIX", "deoos-smoke-") + uuid.uuid4().hex[:20])
+    if bucket is not None:
+        assert len(bucket) <= 63, "test bucket prefix is too long"
     caller_identity = None
     env = dict(os.environ)
     for key in ("AWS_SESSION_TOKEN", "PYTHONPATH", "DEOOS_NATIVE_LIBRARY", "DEOOS_NODE_LIBRARY"):
         env.pop(key, None)
+    for key in list(env):
+        if key.startswith("DEOOS_STORAGE_"):
+            env.pop(key)
+    storage = None
+    s3 = None
+    if args.backend == "filesystem":
+        for key in list(env):
+            if key.startswith("AWS_"):
+                env.pop(key)
+        storage = tempfile.TemporaryDirectory(prefix="deoos-package-smoke-storage-")
+        env.update(DEOOS_STORAGE_PROVIDER="filesystem",
+                   DEOOS_STORAGE_DIRECTORY=str(pathlib.Path(storage.name).resolve()))
+        assert not any(key.startswith("AWS_") for key in env)
+    else:
+        import boto3
+        from botocore.exceptions import ClientError
     if args.backend == "aws":
         expected_account = os.environ.get("DEOOS_EXPECTED_AWS_ACCOUNT")
         if expected_account is not None and (len(expected_account) != 12 or
@@ -727,7 +748,7 @@ def main():
             env["AWS_SESSION_TOKEN"] = credentials.token
         env.pop("AWS_ENDPOINT", None)
         env.pop("AWS_ALLOW_HTTP", None)
-    else:
+    elif args.backend == "rustfs":
         env.update(AWS_ACCESS_KEY_ID="local-development",
                    AWS_SECRET_ACCESS_KEY="local-development-only-secret",
                    AWS_REGION="us-east-1", AWS_ALLOW_HTTP="true")
@@ -736,10 +757,12 @@ def main():
         s3 = boto3.client("s3", endpoint_url=env["AWS_ENDPOINT"], region_name="us-east-1",
                           aws_access_key_id=env["AWS_ACCESS_KEY_ID"],
                           aws_secret_access_key=env["AWS_SECRET_ACCESS_KEY"])
-    env["AWS_BUCKET"] = bucket
+    if bucket is not None:
+        env["AWS_BUCKET"] = bucket
     report = {"backend": args.backend, "release": str(package), "release_hashes": release_hashes,
               "server_version": server_version, "modes": [], "worker_api": [], "cleaned": False,
               "cleanup_errors": [], "bucket": bucket,
+              "storage_directory": env.get("DEOOS_STORAGE_DIRECTORY") if storage else None,
               "aws_identity": {"account": caller_identity["Account"], "arn": caller_identity["Arn"]}
                               if caller_identity else None}
     report_path = ROOT.parent / "outputs" / "evidence" / f"package-smoke-{package.name}-{args.backend}.json"
@@ -748,8 +771,9 @@ def main():
     processes = []
     bucket_created = False
     try:
-        s3.create_bucket(Bucket=bucket)
-        bucket_created = True
+        if s3 is not None:
+            s3.create_bucket(Bucket=bucket)
+            bucket_created = True
         if args.backend == "aws":
             s3.put_public_access_block(
                 Bucket=bucket,
@@ -788,6 +812,9 @@ def main():
                         report["worker_api"].append(run_worker_case(
                             mode, language, python, node, work, package, env, processes,
                         ))
+                if args.backend == "filesystem":
+                    from local_storage import run_local_storage
+                    report["filesystem_processes"] = run_local_storage(python, env)
             finally:
                 for process, label in reversed(processes):
                     try:
@@ -822,6 +849,13 @@ def main():
                 report["cleaned"] = True
             except Exception as error:
                 report["cleanup_errors"].append(f"bucket: {error}")
+        if storage is not None:
+            try:
+                storage.cleanup()
+                assert not pathlib.Path(storage.name).exists(), "test storage still exists"
+                report["cleaned"] = True
+            except Exception as error:
+                report["cleanup_errors"].append(f"filesystem: {error}")
         write_report(report_path, report)
     assert report["cleaned"] and not report["cleanup_errors"], report
     print(json.dumps(report, indent=2))

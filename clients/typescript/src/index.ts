@@ -1,7 +1,10 @@
 import { randomUUID, createHash } from 'node:crypto';
 import {createRequire} from 'node:module';
 const require=createRequire(import.meta.url);
-export interface StorageConfig {provider?:'s3'|'gcs'|'azure';bucket:string;prefix?:string;region?:string;endpoint?:string;access_key_id?:string;secret_access_key?:string;session_token?:string;allow_http?:boolean;lease_ms?:number}
+export type StorageConfig = {prefix?:string;lease_ms?:number} & (
+  {provider:'filesystem';directory:string;bucket?:never;region?:never;endpoint?:never;access_key_id?:never;secret_access_key?:never;session_token?:never;allow_http?:never}
+  | {provider?:'s3'|'gcs'|'azure';bucket:string;directory?:never;region?:string;endpoint?:string;access_key_id?:string;secret_access_key?:string;session_token?:string;allow_http?:boolean}
+);
 export interface ScheduleOptions {first_due_ms?:number;missed?:'latest'|'catchup';overlap?:'skip'|'allow';max_attempts?:number;retry_ms?:number}
 interface NativeHandle {request(method:string,path:string,data:string):Promise<string>}
 export interface HistoryEvent {at_ms:number;event:string;attempts:number;generation:number;detail?:unknown}

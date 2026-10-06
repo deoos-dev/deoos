@@ -1,6 +1,6 @@
 PYTHON ?= python3
 TEST_PYTHON ?= tests/.venv/bin/python
-.PHONY: build setup test-local test-aws test-cluster test-examples package test-package clean-local
+.PHONY: build setup test-local test-aws test-cluster test-examples package test-package test-filesystem clean-local
 
 build:
 	$(PYTHON) packaging/build_package.py --build-only
@@ -30,6 +30,10 @@ package: build
 test-package:
 	docker compose up -d
 	$(TEST_PYTHON) tests/package_smoke.py
+
+test-filesystem: package
+	$(TEST_PYTHON) tests/package_smoke.py --backend filesystem
+	$(TEST_PYTHON) tests/local_faults.py --binary engine/target/release/deoos-engine
 
 clean-local:
 	docker compose down -v

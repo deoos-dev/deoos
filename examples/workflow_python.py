@@ -35,8 +35,11 @@ def create_client():
         return Client.remote(url, token=os.environ.get("ENGINE_TOKEN"))
     if mode == "library":
         provider = os.environ.get("DEOOS_STORAGE_PROVIDER", "s3")
+        if provider == "filesystem":
+            return Client(provider=provider, directory=os.environ.get("DEOOS_STORAGE_DIRECTORY"),
+                          prefix=os.environ.get("EXECUTION_PREFIX", "durable-v3"))
         if provider not in ("s3", "gcs", "azure"):
-            raise ValueError("DEOOS_STORAGE_PROVIDER must be 's3', 'gcs', or 'azure'")
+            raise ValueError("DEOOS_STORAGE_PROVIDER must be 's3', 'gcs', 'azure', or 'filesystem'")
         bucket = os.environ.get("DEOOS_STORAGE_BUCKET") or (
             os.environ.get("AWS_BUCKET") if provider == "s3" else None)
         if not bucket:
