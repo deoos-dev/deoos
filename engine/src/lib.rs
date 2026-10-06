@@ -74,7 +74,7 @@ struct Task {
     #[serde(default)]
     last_retry_fingerprint: Option<String>,
     #[serde(default)]
-    active_incarnation: Option<String>,
+    active_entry_id: Option<String>,
     #[serde(default, flatten)]
     extra: BTreeMap<String, Value>,
 }
@@ -370,7 +370,7 @@ impl Engine {
             task.last_retry_fingerprint = Some(fingerprint.clone());
             task.record("retry", None);
             task.revision = Uuid::new_v4().to_string();
-            task.active_incarnation = Some(Uuid::new_v4().to_string());
+            task.active_entry_id = Some(Uuid::new_v4().to_string());
             self.publish_active(&task, Some(request.expected_revision.clone()))
                 .await?;
             match self.write(&task, PutMode::Update(version)).await {
@@ -826,7 +826,7 @@ async fn submit(State(e): State<Engine>, Json(s): Json<Submit>) -> ApiResult<Tas
         history: Vec::new(),
         last_retry_operation: None,
         last_retry_fingerprint: None,
-        active_incarnation: Some(Uuid::new_v4().to_string()),
+        active_entry_id: Some(Uuid::new_v4().to_string()),
         extra: BTreeMap::new(),
     };
     t.record("submit", None);

@@ -138,7 +138,7 @@ with Client() as a:
     assert claim() is None, 'A claimed an externally created task twice'
 
     # B changes the same task-state key, deletes its active marker, then manual
-    # retry creates a new incarnation. No cached owner, revision or tombstone may
+    # retry creates a new active entry. No cached owner, revision or tombstone may
     # hide these changes from A or let an older token commit.
     cancelled = external('cancel', 'external-task')
     assert cancelled['status'] == 'cancelled'
@@ -150,7 +150,7 @@ with Client() as a:
     second = claim()
     assert second['id'] == first['id']
     assert second['token'] != first['token'] and second['generation'] > first['generation']
-    assert second['active_incarnation'] != first['active_incarnation']
+    assert second['active_entry_id'] != first['active_entry_id']
     assert inventory()['external-task']['revision'] == second['revision']
     try:
         complete(first, 'stale owner must not commit')
@@ -182,7 +182,7 @@ with Client() as a:
     assert claim('cache-schedule.v1') is None
     print(json.dumps({'checks': [
         'warm persistent engine discovers externally created matching task',
-        'external cancel/retry changes remain visible with fresh revisions and incarnation',
+        'external cancel/retry changes remain visible with fresh revisions and active entry',
         'external replacement ownership rejects stale token and preserves current state',
         'terminal marker deletion removes work from warm discovery',
         'matching schedule LIST metadata observes external paused-to-resumed replacement'],

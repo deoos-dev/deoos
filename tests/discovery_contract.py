@@ -76,14 +76,14 @@ def put_state(s3, bucket, prefix, state, active=True):
         marker_task = copy.deepcopy(state)
         if marker_task["status"] in ("completed", "failed", "cancelled"):
             marker_task["status"] = "queued"
-        s3.put_object(Bucket=bucket, Key=f"{prefix}/active/{state['id']}/{state['active_incarnation']}.json",
+        s3.put_object(Bucket=bucket, Key=f"{prefix}/active/{state['id']}/{state['active_entry_id']}.json",
                       Body=json.dumps({"version": 1, "task": marker_task, "expected_revision": None},
                                       separators=(",", ":")).encode(), ContentType="application/json")
 
 
 def clone_state(template, identifier, status):
     state = copy.deepcopy(template)
-    state.update(id=identifier, revision=uuid.uuid4().hex, status=status, active_incarnation=str(uuid.uuid4()))
+    state.update(id=identifier, revision=uuid.uuid4().hex, status=status, active_entry_id=str(uuid.uuid4()))
     if status == "queued":
         state.update(attempts=0, available_at=0, expires_at=0, owner=None, token=None,
                      error=None, waiting_on=None, history=[])
@@ -272,7 +272,7 @@ def main():
         put_state(s3, bucket, delete_prefix, clone_state(queued_template, "b-eligible", "queued"))
         put_state(s3, bucket, delete_prefix, clone_state(terminal_template, "z-terminal", "completed"))
         deleted = {"done": False}
-        victim_key = f"{delete_prefix}/active/a-victim/{victim['active_incarnation']}.json"
+        victim_key = f"{delete_prefix}/active/a-victim/{victim['active_entry_id']}.json"
         def delete_after_task_list(family):
             if family == "active" and not deleted["done"]:
                 s3.delete_object(Bucket=bucket, Key=victim_key)

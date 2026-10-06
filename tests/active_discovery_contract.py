@@ -82,7 +82,7 @@ def main():
         put(case_prefix + "/active-index.json", {"version": 1, "status": "ready"})
 
     def marker_key(case_prefix, task):
-        return f"{case_prefix}/active/{task['id']}/{task['active_incarnation']}.json"
+        return f"{case_prefix}/active/{task['id']}/{task['active_entry_id']}.json"
 
     def intent(case_prefix, task, expected=None):
         key = marker_key(case_prefix, task)
@@ -128,7 +128,7 @@ def main():
 
     def proposed(template, identifier):
         task = copy.deepcopy(template)
-        task.update(id=identifier, revision=str(uuid.uuid4()), active_incarnation=str(uuid.uuid4()),
+        task.update(id=identifier, revision=str(uuid.uuid4()), active_entry_id=str(uuid.uuid4()),
                     status="queued", attempts=0, available_at=0, owner=None, token=None, expires_at=0,
                     output=None, error=None, waiting_on=None, steps={}, definitions={}, history=[])
         return task
@@ -147,7 +147,7 @@ def main():
         created = True
         template_client = open_client("library", prefix + "/template")
         template = template_client.submit("template", "contract.active", {})
-        assert template.get("active_incarnation"), template
+        assert template.get("active_entry_id"), template
         for mode in ("library", "server"):
             for count in args.history:
                 case_prefix = f"{prefix}/{mode}/history-{count}"
@@ -215,7 +215,7 @@ def main():
             assert losing_key not in names(case_prefix + "/active/")
             assert client.inspect(original["id"])["inputs"] == {"definition": "winner"}
             recovered = claim(client)
-            assert recovered and recovered["active_incarnation"] == original["active_incarnation"]
+            assert recovered and recovered["active_entry_id"] == original["active_entry_id"]
             finish(client, recovered)
             report["checks"].append({"mode": mode, "name": "losing duplicate-create intent is discarded without changing winner"})
             for barrier in ("intent-only", "task-written-before-response"):
@@ -225,12 +225,12 @@ def main():
                     put(state_key(case_prefix, task), task)
                 recovered = claim(client)
                 assert recovered and recovered["id"] == task["id"]
-                assert recovered["active_incarnation"] == task["active_incarnation"]
+                assert recovered["active_entry_id"] == task["active_entry_id"]
                 finish(client, recovered)
                 assert claim(client) is None
                 assert key not in names(case_prefix + "/active/")
                 assert client.inspect(task["id"])["status"] == "completed"
-                report["checks"].append({"mode": mode, "name": barrier + " repaired by worker", "incarnation": task["active_incarnation"]})
+                report["checks"].append({"mode": mode, "name": barrier + " repaired by worker", "active_entry_id": task["active_entry_id"]})
 
             # Persisted retry intent is authoritative only at its exact predecessor revision.
             client.submit("retry-crash", "contract.active", {})
@@ -241,7 +241,7 @@ def main():
                 json.dumps({"expected_revision": failed["revision"]}, separators=(",", ":")).encode()).hexdigest())
             retry_key = intent(case_prefix, retry_task, failed["revision"])
             recovered = claim(client)
-            assert recovered and recovered["id"] == "retry-crash" and recovered["active_incarnation"] == retry_task["active_incarnation"]
+            assert recovered and recovered["id"] == "retry-crash" and recovered["active_entry_id"] == retry_task["active_entry_id"]
             assert recovered["attempts"] == 1
             finish(client, recovered)
             # A stale retry intent with a mismatched predecessor must never resurrect terminal work.
@@ -269,23 +269,23 @@ def main():
                 proxy.after_list = None
             assert raced, "active LIST barrier was not reached"
             new_task = raced["task"]
-            assert new_task["active_incarnation"] != queued["active_incarnation"]
+            assert new_task["active_entry_id"] != queued["active_entry_id"]
             new_key = marker_key(case_prefix, new_task)
             assert old_key not in names(case_prefix + "/active/")
             assert new_key in names(case_prefix + "/active/")
             if result is None:
                 result = claim(client)
-            assert result and result["id"] == failed["id"] and result["active_incarnation"] == new_task["active_incarnation"]
+            assert result and result["id"] == failed["id"] and result["active_entry_id"] == new_task["active_entry_id"]
             finish(client, result)
             assert client.inspect(failed["id"])["status"] == "completed"
-            report["checks"].append({"mode": mode, "name": "cleanup racing explicit retry deletes old incarnation only"})
+            report["checks"].append({"mode": mode, "name": "cleanup racing explicit retry deletes old active entry only"})
 
             # Missing-index task records are rejected unchanged, including terminal or malformed records.
             for fixture in ("queued", "completed", "malformed", "current-without-index"):
                 incompatible_prefix = f"{prefix}/{mode}/incompatible-{fixture}"
                 stored = proposed(template, "retained")
                 if fixture != "current-without-index":
-                    stored.pop("active_incarnation", None)
+                    stored.pop("active_entry_id", None)
                 if fixture == "completed":
                     stored.update(status="completed", output="retained output")
                 key = state_key(incompatible_prefix, stored)
@@ -311,6 +311,37 @@ def main():
                     assert operations.get("PUT", 0) == 0 and operations.get("DELETE", 0) == 0, operations
                     assert names(incompatible_prefix + "/") == before
                 report["checks"].append({"mode": mode, "name": f"{fixture} records without index reject claim and submit without mutations"})
+
+            # A ready index does not make unsupported task field layouts valid.
+            for fixture in ("old-field-only", "missing-entry-id", "null-entry-id"):
+                incompatible_prefix = f"{prefix}/{mode}/invalid-entry-{fixture}"
+                ready(incompatible_prefix)
+                stored = proposed(template, "retained")
+                if fixture == "old-field-only":
+                    stored["active_incarnation"] = stored.pop("active_entry_id")
+                elif fixture == "missing-entry-id":
+                    stored.pop("active_entry_id")
+                else:
+                    stored["active_entry_id"] = None
+                put(state_key(incompatible_prefix, stored), stored)
+                before = names(incompatible_prefix + "/")
+                rejected = open_client(mode, incompatible_prefix)
+                for operation in (lambda: rejected.inspect(stored["id"]),
+                                  lambda: rejected.submit(stored["id"], stored["handler"], stored["inputs"]),
+                                  lambda: rejected.retry(stored["id"], stored["revision"])):
+                    proxy.drain()
+                    proxy.reset()
+                    try:
+                        operation()
+                    except EngineError as error:
+                        assert error.status == 409, error
+                    else:
+                        raise AssertionError("invalid active entry ID did not reject stored task")
+                    proxy.drain()
+                    operations = proxy.snapshot()["requests"]
+                    assert operations.get("PUT", 0) == 0 and operations.get("DELETE", 0) == 0, operations
+                    assert names(incompatible_prefix + "/") == before
+                report["checks"].append({"mode": mode, "name": f"{fixture} with ready index rejects inspect, same-ID submit and operator retry without mutations"})
 
             # Independent current engines race to initialize a fresh prefix and submit separate work.
             fresh_prefix = f"{prefix}/{mode}/concurrent-fresh"

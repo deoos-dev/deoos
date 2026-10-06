@@ -259,7 +259,7 @@ passed = []
 secrets = ['INPUT-PAYLOAD-SENTINEL', 'CHECKPOINT-PAYLOAD-SENTINEL',
            'SIGNAL-PAYLOAD-SENTINEL', 'OUTPUT-PAYLOAD-SENTINEL']
 forbidden = {'inputs', 'output', 'owner', 'token', 'revision', 'generation',
-             'active_incarnation', 'history', 'definitions', 'timers', 'signals',
+             'active_entry_id', 'history', 'definitions', 'timers', 'signals',
              'last_operation', 'last_retry_operation'}
 
 def summary(task_id, status):
@@ -476,7 +476,7 @@ const passed = [];
 const secrets = ['INPUT-PAYLOAD-SENTINEL', 'CHECKPOINT-PAYLOAD-SENTINEL',
   'SIGNAL-PAYLOAD-SENTINEL', 'OUTPUT-PAYLOAD-SENTINEL'];
 const forbidden = ['inputs', 'output', 'owner', 'token', 'revision', 'generation',
-  'active_incarnation', 'history', 'definitions', 'timers', 'signals',
+  'active_entry_id', 'history', 'definitions', 'timers', 'signals',
   'last_operation', 'last_retry_operation'];
 async function summary(id, status) {
   const value = await c.summary(id);

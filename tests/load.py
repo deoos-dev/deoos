@@ -53,8 +53,8 @@ def seed_completed_history(s3, bucket, prefix, client, count):
     def seed(index):
         state = copy.deepcopy(template)
         state.update(id=f"history-{index:06d}", revision=uuid.uuid4().hex)
-        if state.get("active_incarnation"):
-            state["active_incarnation"] = str(uuid.uuid4())
+        if state.get("active_entry_id"):
+            state["active_entry_id"] = str(uuid.uuid4())
         s3.put_object(Bucket=bucket, Key=f"{prefix}/tasks/{state['id']}/state.json",
                       Body=json.dumps(state, separators=(",", ":")).encode())
     with ThreadPoolExecutor(max_workers=16) as pool:

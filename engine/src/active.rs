@@ -27,10 +27,7 @@ impl Task {
             || !valid(&self.handler)
             || !valid(&self.revision)
             || self.max_attempts == 0
-            || self
-                .active_incarnation
-                .as_deref()
-                .is_some_and(|value| !valid(value))
+            || !self.active_entry_id.as_deref().is_some_and(valid)
             || !matches!(
                 self.status.as_str(),
                 "queued" | "running" | "waiting" | "completed" | "failed" | "cancelled"
@@ -44,13 +41,13 @@ impl Task {
 
 impl Engine {
     fn active_key(&self, task: &Task) -> Result<Key, (StatusCode, String)> {
-        let incarnation = task
-            .active_incarnation
+        let entry_id = task
+            .active_entry_id
             .as_deref()
             .filter(|value| valid(value))
-            .ok_or_else(|| conflict("active task incarnation required"))?;
+            .ok_or_else(|| conflict("active entry ID required"))?;
         Ok(Key::from(format!(
-            "{}/active/{}/{incarnation}.json",
+            "{}/active/{}/{entry_id}.json",
             self.prefix, task.id
         )))
     }
@@ -95,10 +92,10 @@ impl Engine {
                 {
                     return Ok(());
                 }
-                // Discovery may have committed this incarnation and already retired its
+                // Discovery may have committed this active entry and already retired its
                 // marker before readback. The authoritative state is sufficient proof.
                 if let Ok((actual, _)) = self.read(&task.id).await
-                    && actual.active_incarnation == task.active_incarnation
+                    && actual.active_entry_id == task.active_entry_id
                 {
                     return Ok(());
                 }
@@ -138,26 +135,26 @@ impl Engine {
         let (id, suffix) = relative
             .split_once('/')
             .ok_or_else(|| conflict("invalid stored active key"))?;
-        let incarnation = suffix
+        let entry_id = suffix
             .strip_suffix(".json")
             .filter(|value| valid(value))
             .ok_or_else(|| conflict("invalid stored active key"))?;
         if !valid(id) {
             return Err(conflict("invalid stored active key"));
         }
-        Ok((id, incarnation))
+        Ok((id, entry_id))
     }
 
     pub(super) async fn resolve_active(
         &self,
         key: &Key,
     ) -> Result<Option<StateVersion>, (StatusCode, String)> {
-        let (id, incarnation) = self.active_identity(key)?;
+        let (id, entry_id) = self.active_identity(key)?;
         let mut current = self.read(id).await;
         if let Ok((task, version)) = &current
-            && task.active_incarnation.as_deref() == Some(incarnation)
+            && task.active_entry_id.as_deref() == Some(entry_id)
         {
-            // The state proves this marker was published before its incarnation committed.
+            // The state proves this marker was published before its active entry committed.
             // No marker GET or cached state hint is needed in the normal discovery path.
             if task.terminal() {
                 self.retire_active(key).await?;
@@ -191,7 +188,7 @@ impl Engine {
         for _ in 0..16 {
             let mode = match current {
                 Ok((task, version)) => {
-                    if task.active_incarnation == intent.task.active_incarnation {
+                    if task.active_entry_id == intent.task.active_entry_id {
                         if task.terminal() {
                             self.retire_active(key).await?;
                             return Ok(None);
