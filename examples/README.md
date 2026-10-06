@@ -1,6 +1,58 @@
 # DEOOS use cases
 
-These examples use the same workflows in library and server modes, with interchangeable Python and TypeScript workers. They demonstrate practical execution patterns through a local HTTP service adapter. They do not establish integration with a payment, accounting, messaging or data vendor.
+These examples use the same workflows in library and server modes, with interchangeable Python and TypeScript workers. Hacker News uses a real public API; the other examples use a simulated HTTP service.
+
+## Hacker News → DuckDB
+
+`hacker_news.py` and `hacker_news.mjs` collect 100 items from the [Hacker News API](https://github.com/HackerNews/API) into a local DuckDB file. DEOOS remembers the chosen IDs and each fetch and database write. If the worker stops, restart it with the same configuration: completed steps return their saved results, and unfinished steps retry after the lease expires.
+
+Install the DEOOS SDK as shown in the main README, then install the database client:
+
+```sh
+python -m pip install duckdb==1.5.6
+# In your Node project, alongside deoos and hacker_news.mjs:
+npm install @duckdb/node-api@1.5.6-r.1
+```
+
+For a local trial, start RustFS with `docker compose up -d` from the source repository, then configure library mode and create a development bucket:
+
+```sh
+export DEOOS_MODE=library
+export AWS_ENDPOINT=http://127.0.0.1:19000 AWS_ALLOW_HTTP=true
+export AWS_ACCESS_KEY_ID=local-development
+export AWS_SECRET_ACCESS_KEY=local-development-only-secret
+export AWS_REGION=us-east-1 DEOOS_STORAGE_BUCKET=hacker-news-workflows
+export EXECUTION_PREFIX=hacker-news
+aws --endpoint-url "$AWS_ENDPOINT" s3 mb "s3://$DEOOS_STORAGE_BUCKET"
+```
+
+From the directory where you copied the example, run:
+
+```sh
+python hacker_news.py submit --id collection-001
+python hacker_news.py work --once
+python hacker_news.py inspect --id collection-001
+python hacker_news.py query
+```
+
+Replace `python hacker_news.py` with `node hacker_news.mjs` for TypeScript. Both use the same handler and checkpoint names, so either worker can resume the other. `query` reads only the DuckDB file and works offline. Change the task ID for a new collection; `--database` chooses its file.
+
+For scheduled collection, use `schedule --id daily-news --interval-ms 86400000`, then `work` without `--once`. Workers admit due runs while polling. These are fixed intervals, and an occurrence is skipped when the previous run is still active. Use the main README's server instructions and set `DEOOS_MODE=server`, `ENGINE_URL` and `ENGINE_TOKEN` to run the same example in server mode.
+
+The database has two tables: `stories` stores the first captured JSON payload for each ID, and `collections` stores each task's IDs and order. Inserts use `ON CONFLICT DO NOTHING` in one transaction. A retry after a database commit but before its DEOOS checkpoint preserves existing rows. Later collections also preserve the first payload; this example does not refresh changing stories. Missing or deleted items are retained, so 100 IDs need not mean 100 article links.
+
+Use one worker per DuckDB file, and restart on the same machine or persistent volume. Server mode shares execution state, not the worker's local database. In cloud deployments, put workers near their object store; for self-hosting, keep workers beside RustFS.
+
+The source test `tests/hacker_news.py` exercises both SDKs and modes, API failure, two forced worker stops (including the commit/checkpoint gap), preservation of an existing marked row, scheduled runs and offline queries. It captures 100 items from the real API once and replays those responses across the cases. With RustFS running, the SDKs installed, and the Node example inside your Node project, run:
+
+```sh
+ENGINE_BINARY=/path/to/deoos-server python tests/hacker_news.py \
+  --node-example /path/to/your/node-project/hacker_news.mjs
+```
+
+The test needs `boto3` in the Python environment to create and remove its isolated RustFS bucket.
+
+## Other use cases
 
 | Use case | Durable behavior | Integration boundary |
 | --- | --- | --- |
