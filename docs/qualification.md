@@ -2,6 +2,19 @@
 
 This document preserves the test evidence and its limits. Historical results describe the builds, hosts and workloads named below; they do not qualify every later release or deployment. For current operating rules, see [Operations](operations.md).
 
+## Release completeness
+
+Every release must include `macos-arm64`, `macos-x64`, `linux-arm64`, `linux-x64`, and `windows-x64`. A release is incomplete until each archive has matching fresh-install evidence for Python and TypeScript in library and server modes. Building for a target, including cross-compilation, does not establish that its packages run there. Record the actual runtime architecture; execution under emulation is not native-host testing.
+
+Before publishing, run the local gate (it does not build, upload, or start GitHub Actions):
+
+```sh
+python3 packaging/verify_release.py --version VERSION --source FULL_COMMIT_SHA \
+  --outputs ../outputs --evidence ../outputs/evidence
+```
+
+For each target, `build-TARGET.json` in the evidence directory records `source_commit`, `target`, and `archive_sha256`. Matching `package-smoke-deoos-VERSION-TARGET-BACKEND.json` reports come from `tests/package_smoke.py`. The gate checks all five archives, complete payload checksums, licenses, docs, SDKs, native artifact headers, source attestations, and installed-package recovery/worker evidence. Keep the attestations and reports with the release evidence. Historical reports cannot qualify new archive contents.
+
 ## Release targets and installation scope
 
 The 0.7.0 alpha release currently ships a locally verified Mac Apple Silicon package. Other targets below were qualified in earlier releases and require fresh 0.7.0 qualification before shipping. Download and unpack the release for your platform. Python 3.10+ and Node 22+ are required for their respective SDKs. No Rust compiler is needed to use the prebuilt release.
