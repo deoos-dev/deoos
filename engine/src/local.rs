@@ -1,9 +1,14 @@
 //! Private, local APFS object storage. All participants must use this adapter.
 //!
 //! Lock files are permanent: removing one can split locking between processes.
-//! A key's header and body are one atomically replaced file. Successful reads also
-//! establish a durability barrier, so a prior writer dying after rename cannot
-//! turn an uncertain publication into a successful, but non-durable, read.
+//! A key's header and body are one atomically replaced file. Under the key lock,
+//! readers validate the current envelope and establish a durability barrier for
+//! any version not already confirmed durable by this store, and for absence.
+//! Bounded process-local ETag certificates avoid repeating that barrier for an
+//! unchanged, previously durable version; bytes and metadata are always reread.
+//! A writer dying after rename therefore cannot turn an uncertain publication
+//! into a successful, but non-durable, read. Certified reads are not new fsync
+//! health probes; writes always perform their durability barriers.
 use std::{
     collections::{BTreeSet, HashMap},
     fmt,
@@ -34,6 +39,7 @@ const MAGIC: &[u8; 8] = b"DEOOSL01";
 const MAX_HEADER: usize = 64 * 1024;
 const MAX_KEY_HINTS: usize = 8192;
 const MAX_HINT_KEY_BYTES: usize = 1024;
+const MAX_DURABLE_ETAGS: usize = 8192;
 
 /// Kept distinct from ordinary storage errors: reconciling by reading after this
 /// error must never allow the failed operation to be reported as successful.
@@ -88,6 +94,8 @@ pub(super) struct LocalObjectStore {
     // Only immutable hash-to-key mappings, never existence, metadata, or ETags.
     // Clones share hints; separately opened stores start with an empty cache.
     key_hints: Arc<Mutex<HashMap<String, Path>>>,
+    // Fixed-size hashes and validated UUID ETags; never cached object content.
+    durable_etags: Arc<Mutex<HashMap<String, String>>>,
 }
 impl fmt::Display for LocalObjectStore {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -130,6 +138,7 @@ impl LocalObjectStore {
         let store = Self {
             root: root.to_path_buf(),
             key_hints: Arc::new(Mutex::new(HashMap::new())),
+            durable_etags: Arc::new(Mutex::new(HashMap::new())),
         };
         check_private_dir(root)?;
         check_filesystem(root)?;
@@ -166,6 +175,39 @@ impl LocalObjectStore {
                 .get(hash)
                 .is_some_and(|key| !key.prefix_matches(prefix))
         })
+    }
+    fn confirmed_durable(&self, hash: &str, etag: &str) -> bool {
+        self.durable_etags
+            .lock()
+            .ok()
+            .is_some_and(|certificates| certificates.get(hash).is_some_and(|known| known == etag))
+    }
+    fn remember_durable(&self, hash: &str, etag: &str) {
+        // Existing entries can advance even at capacity. New hashes and poisoned
+        // caches fall back to barriers; no certificate is needed for correctness.
+        if let Ok(mut certificates) = self.durable_etags.lock()
+            && (certificates.len() < MAX_DURABLE_ETAGS || certificates.contains_key(hash))
+        {
+            certificates.insert(hash.to_owned(), etag.to_owned());
+        }
+    }
+    /// Caller holds the stable key lock for this entire operation and its use of
+    /// the returned file. Published envelopes are immutable; every put gets a
+    /// fresh UUID, including delete/recreate and same-content replacements.
+    fn read_durable_header(&self, hash: &str, lock: &File) -> Result<Option<(Header, File)>> {
+        let current = self.read_header(hash);
+        if let Ok(Some((header, _))) = &current
+            && self.confirmed_durable(hash, &header.etag)
+        {
+            return current;
+        }
+        // Even absence and invalid/unreadable headers require this barrier.
+        // A barrier failure takes precedence over the original read error.
+        self.barrier(lock)?;
+        if let Ok(Some((header, _))) = &current {
+            self.remember_durable(hash, &header.etag);
+        }
+        current
     }
     fn bootstrap(&self) -> Result<File> {
         let file = open_private_file(&self.root.join("bootstrap.lock"), true)?;
@@ -231,8 +273,7 @@ impl LocalObjectStore {
         }
         let hash = digest(key.as_ref());
         let lock = self.lock(&hash)?;
-        self.barrier(&lock)?;
-        let current = self.read_header(&hash)?;
+        let current = self.read_durable_header(&hash, &lock)?;
         match opts.mode {
             PutMode::Create if current.is_some() => {
                 return Err(Error::AlreadyExists {
@@ -282,6 +323,7 @@ impl LocalObjectStore {
             full_sync(&file).map_err(durability)?;
             fs::rename(&temporary, self.object_path(&hash)).map_err(generic)?;
             self.barrier(&lock)?;
+            self.remember_durable(&hash, &etag);
             self.remember_key(&hash, &key);
             Ok(PutResult {
                 e_tag: Some(etag),
@@ -298,8 +340,9 @@ impl LocalObjectStore {
         }
         let hash = digest(key.as_ref());
         let lock = self.lock(&hash)?;
-        self.barrier(&lock)?;
-        let (header, mut file) = self.read_header(&hash)?.ok_or_else(|| missing(&key))?;
+        let (header, mut file) = self
+            .read_durable_header(&hash, &lock)?
+            .ok_or_else(|| missing(&key))?;
         let meta = header.meta()?;
         options.check_preconditions(&meta)?;
         let range = match options.range {
@@ -347,8 +390,9 @@ impl LocalObjectStore {
                 return Err(generic("unexpected entry in local objects directory"));
             }
             // Every filename is still enumerated and checked. Only a validated,
-            // immutable key can rule out a prefix match; matching and unknown
-            // entries retain their fresh locked read and durability barrier.
+            // immutable key can rule out a prefix match. Matching and unknown
+            // entries are freshly read under their key lock; unconfirmed versions
+            // still require a durability barrier.
             if prefix
                 .as_ref()
                 .is_some_and(|p| self.known_outside_prefix(hash, p))
@@ -356,8 +400,7 @@ impl LocalObjectStore {
                 continue;
             }
             let lock = self.lock(hash)?;
-            self.barrier(&lock)?;
-            if let Some((header, _)) = self.read_header(hash)? {
+            if let Some((header, _)) = self.read_durable_header(hash, &lock)? {
                 let meta = header.meta()?;
                 if prefix
                     .as_ref()

@@ -1,6 +1,7 @@
 /* macOS-only test interposer. Never linked into the engine or shipped SDK.
- * Arm by creating DEOOS_FAULT_ARM after server startup. One exact destination
- * rename consumes that file; unrelated writes and startup barriers are untouched.
+ * Arm by creating DEOOS_FAULT_ARM after server startup. Rename modes consume it
+ * for one exact destination; fail-read-sync consumes it for one objects-directory
+ * barrier in an otherwise idle reader. Startup barriers are untouched.
  */
 #include <errno.h>
 #include <fcntl.h>
@@ -8,6 +9,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/param.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -50,6 +52,24 @@ static int injected_rename(const char *from, const char *to) {
 }
 
 static int injected_fsync(int fd) {
+    /* A read never renames the target. This separate one-shot mode faults the
+     * objects-directory barrier only after the test explicitly arms an idle
+     * reader process. F_GETPATH scopes it to the owned target's directory. */
+    if (target && arm && marker && mode && strcmp(mode, "fail-read-sync") == 0) {
+        struct stat info;
+        char path[MAXPATHLEN];
+        const char *slash = strrchr(target, '/');
+        if (slash && fstat(fd, &info) == 0 && S_ISDIR(info.st_mode)
+                && fcntl(fd, F_GETPATH, path) == 0) {
+            size_t length = (size_t)(slash - target);
+            if (strlen(path) == length && strncmp(path, target, length) == 0
+                    && unlink(arm) == 0) {
+                mark("read-directory-fsync-EIO");
+                errno = EIO;
+                return -1;
+            }
+        }
+    }
     if (fail_next_directory_sync) {
         struct stat info;
         if (fstat(fd, &info) == 0 && S_ISDIR(info.st_mode)) {
