@@ -6,7 +6,7 @@ Small, simple, and safe. Write ordinary functions. Completed steps are remembere
 
 ## Install
 
-Download the package for your platform from [Releases](https://github.com/deoos-dev/deoos/releases). Python 3.10+ and Node 22+ are required for their respective SDKs; no Rust compiler is needed. The current alpha package is for Mac Apple Silicon. See [Qualification](docs/qualification.md) for platform coverage.
+Download the package for your platform from [Releases](https://github.com/deoos-dev/deoos/releases). Python 3.10+ and Node 22+ are required for their respective SDKs; no Rust compiler is needed. Choose the archive matching your operating system and CPU. Release notes list the available builds.
 
 ```sh
 python3 -m venv .venv
@@ -19,7 +19,7 @@ Packages are not yet published to registries. Each release includes both SDKs, t
 
 ## Quick start
 
-These examples use library mode. Create a bucket and configure its credentials first. Replace the bucket and region with yours; see [storage configuration](docs/operations.md#storage-configuration) for other providers.
+These examples use library mode. Create a bucket and configure its credentials first. Replace the bucket and region with yours. The [examples](examples/README.md#deployment) show provider configuration.
 
 ### Python
 
@@ -54,7 +54,7 @@ The task ID identifies the work. Reusing it with the same definition returns the
 
 The Rust engine runs inside your Python or Node worker. Each worker holds storage credentials and uses the same bucket and execution prefix. No execution server is needed. In the examples, `DEOOS_MODE=library` selects library mode.
 
-Run cloud workers near their object store, or self-hosted workers beside RustFS. For a local trial on Mac Apple Silicon, an experimental filesystem adapter accepts `provider="filesystem"` and a private local APFS directory. See [Operations](docs/operations.md) for storage settings and worker lifecycle details.
+Run cloud workers near their object store, or self-hosted workers beside RustFS. For a local trial on Mac Apple Silicon, an experimental filesystem adapter accepts `provider="filesystem"` and a private local APFS directory.
 
 ## Server mode
 
@@ -74,7 +74,7 @@ engine = Client.remote("http://127.0.0.1:7331", token="your-token")
 const engine = Client.remote("http://127.0.0.1:7331", "your-token");
 ```
 
-The workflow APIs are the same in both modes. Use HTTPS through a TLS proxy across machines; non-loopback binding requires a token. See [server deployment](docs/operations.md#server-deployment).
+The workflow APIs are the same in both modes. Use HTTPS through a TLS proxy across machines; non-loopback binding requires a token.
 
 ## Features
 
@@ -93,7 +93,7 @@ python -m deoos history greeting-001
 python -m deoos inspect greeting-001 --internal
 ```
 
-The CLI uses your storage configuration in library mode, or `ENGINE_URL` and `ENGINE_TOKEN` in server mode. See the [paired Python and TypeScript examples](examples/README.md) and [Operations](docs/operations.md) for details.
+The CLI uses your storage configuration in library mode, or `ENGINE_URL` and `ENGINE_TOKEN` in server mode. See the [paired Python and TypeScript examples](examples/README.md) for runnable workflows.
 
 ## Guarantees and limits
 
@@ -105,7 +105,7 @@ Storage-layout changes require a fresh state directory or execution prefix; this
 
 No production HA, tenant isolation, garbage collection or application throughput guarantee is claimed.
 
-See [Operations](docs/operations.md) for storage layout, discovery, retention and code evolution. See [Qualification](docs/qualification.md) for test coverage, dated measurements and their limits.
+Keep task state and checkpoint objects while an execution prefix remains writable. Do not apply age-based deletion to live workflow state; stop all writers before retiring a prefix.
 
 ## License
 

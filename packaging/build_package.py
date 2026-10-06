@@ -202,7 +202,6 @@ def package(label: str, suffix: str, npm_os: str, npm_cpu: str, explicit_target:
     shutil.copy2(server, release / "bin" / ("deoos-server.exe" if npm_os == "win32" else "deoos-server"))
     shutil.copy2(ROOT / "README.md", release / "README.md")
     shutil.copy2(ROOT / "LICENSE", release / "LICENSE")
-    shutil.copytree(ROOT / "docs", release / "docs")
     examples = release / "examples"
     examples.mkdir()
     for name in ("README.md", "library_python.py", "library_typescript.mjs", "server_python.py", "server_typescript.mjs", "workflow_python.py", "workflow_typescript.mjs", "use_cases.py", "use_cases.mjs"):

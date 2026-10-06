@@ -16,7 +16,7 @@ The paired programs are `use_cases.py` and `use_cases.mjs`. They use only the DE
 
 In cloud deployments, run workers in the relevant cloud near the authoritative object store. In self-hosted deployments, run workers beside RustFS or on the same machine. Library mode puts Rust in each worker process; server mode uses a separate engine service. Storage and destination services remain dependencies in either mode.
 
-See the main guide for [provider coverage and its limits](../docs/qualification.md#object-store-qualification). Credentials, network routing and provider configuration differ; the execution behavior contract must remain the same.
+For R2, use the S3 provider with your account endpoint and region `auto`. GCS and Azure use `DEOOS_STORAGE_PROVIDER=gcs` or `azure` with their native `GOOGLE_*` or `AZURE_*` credentials. Use the same bucket/container and execution prefix across workers.
 
 For library mode, configure `DEOOS_MODE=library`, `DEOOS_STORAGE_BUCKET`, storage credentials and optionally `EXECUTION_PREFIX`. `DEOOS_STORAGE_PROVIDER` selects `s3` (default), `gcs` or `azure`. For S3, configure `AWS_REGION`; `AWS_BUCKET` remains a compatible bucket setting. For local RustFS, also use `AWS_ENDPOINT=http://127.0.0.1:19000` and `AWS_ALLOW_HTTP=true`, with the development credentials in the repository's `compose.yaml`.
 
@@ -45,4 +45,4 @@ Replace `python examples/use_cases.py` with `node examples/use_cases.mjs` for Ty
 
 ## Verification
 
-See [Qualification](../docs/qualification.md#use-case-and-load-test-commands) for the behavioral suite, cloud test setup, load commands and measurement limits.
+From the source repository, run `make setup test-examples PYTHON=python3.12` (Rust, Node and Docker Compose required). This runs all three examples with both SDKs and modes, including retries and worker replacement. The harness creates and removes its own test bucket; stop the manually started service before running it.

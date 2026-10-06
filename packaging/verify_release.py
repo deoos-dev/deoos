@@ -72,7 +72,7 @@ def verify_target(outputs: pathlib.Path, evidence: pathlib.Path, version: str,
         sums[path] = checksum
     hashes = {path: digest(data) for path, data in files.items() if path != "SHA256SUMS"}
     require(sums == hashes, f"{target}: incomplete or incorrect payload checksums")
-    for path in ("LICENSE", "README.md", "docs/operations.md", "docs/qualification.md",
+    for path in ("LICENSE", "README.md",
                  "examples/README.md", "examples/library_python.py", "examples/library_typescript.mjs",
                  "examples/server_python.py", "examples/server_typescript.mjs"):
         require(bool(files.get(path)), f"{target}: missing {path}")
