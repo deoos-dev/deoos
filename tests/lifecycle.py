@@ -61,7 +61,7 @@ def run():
             a.submit('stale');old=a.claim();time.sleep(6.3)
             expect_conflict(lambda:a.mutate(old,'renew'))
             new=b.claim()
-            assert new['id']=='stale' and new['generation']==old['generation']+1
+            assert new['id']=='stale' and new['token']!=old['token']
             for action in ['renew','steps/late','complete','fail']:
                 expect_conflict(lambda action=action:a.mutate(old,action,{'stale':True}))
             b.mutate(new,'complete',{'new':True});results.append('stale owner rejected for heartbeat, checkpoint, completion and failure')

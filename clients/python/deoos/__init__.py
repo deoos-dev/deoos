@@ -114,6 +114,16 @@ class Client:
         _valid_step(task_id)
         return self.request(f"/tasks/{task_id}")
 
+    def view(self, task_id):
+        """Readable task state including inputs/output, without internal coordination fields."""
+        _valid_step(task_id)
+        return self.request(f"/tasks/{task_id}/view")
+
+    def history(self, task_id):
+        """The last 32 recorded events, separately from the task view."""
+        _valid_step(task_id)
+        return self.request(f"/tasks/{task_id}/history")["history"]
+
     def summary(self, task_id):
         """Return persisted progress metadata without inputs, outputs, or checkpoint values."""
         _valid_step(task_id)

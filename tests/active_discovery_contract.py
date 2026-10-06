@@ -313,7 +313,7 @@ def main():
                 report["checks"].append({"mode": mode, "name": f"{fixture} records without index reject claim and submit without mutations"})
 
             # A ready index does not make unsupported task field layouts valid.
-            for fixture in ("old-field-only", "missing-entry-id", "null-entry-id"):
+            for fixture in ("old-field-only", "missing-entry-id", "null-entry-id", "unknown-field"):
                 incompatible_prefix = f"{prefix}/{mode}/invalid-entry-{fixture}"
                 ready(incompatible_prefix)
                 stored = proposed(template, "retained")
@@ -321,14 +321,23 @@ def main():
                     stored["active_incarnation"] = stored.pop("active_entry_id")
                 elif fixture == "missing-entry-id":
                     stored.pop("active_entry_id")
-                else:
+                elif fixture == "null-entry-id":
                     stored["active_entry_id"] = None
+                else:
+                    stored["arbitrary_metadata"] = {"user_data": "must not be discarded"}
                 put(state_key(incompatible_prefix, stored), stored)
+                if fixture == "unknown-field":
+                    intent(incompatible_prefix, stored)
+                original = s3.get_object(Bucket=bucket, Key=state_key(incompatible_prefix, stored))["Body"].read()
                 before = names(incompatible_prefix + "/")
                 rejected = open_client(mode, incompatible_prefix)
-                for operation in (lambda: rejected.inspect(stored["id"]),
-                                  lambda: rejected.submit(stored["id"], stored["handler"], stored["inputs"]),
-                                  lambda: rejected.retry(stored["id"], stored["revision"])):
+                rejected_operations = [lambda: rejected.inspect(stored["id"]),
+                                       lambda: rejected.submit(stored["id"], stored["handler"], stored["inputs"]),
+                                       lambda: rejected.retry(stored["id"], stored["revision"]),
+                                       lambda: rejected.request("/tasks/" + stored["id"] + "/cancel", {})]
+                if fixture == "unknown-field":
+                    rejected_operations.append(lambda: claim(rejected))
+                for operation in rejected_operations:
                     proxy.drain()
                     proxy.reset()
                     try:
@@ -341,7 +350,8 @@ def main():
                     operations = proxy.snapshot()["requests"]
                     assert operations.get("PUT", 0) == 0 and operations.get("DELETE", 0) == 0, operations
                     assert names(incompatible_prefix + "/") == before
-                report["checks"].append({"mode": mode, "name": f"{fixture} with ready index rejects inspect, same-ID submit and operator retry without mutations"})
+                    assert s3.get_object(Bucket=bucket, Key=state_key(incompatible_prefix, stored))["Body"].read() == original
+                report["checks"].append({"mode": mode, "name": f"{fixture} with ready index rejects {len(rejected_operations)} operations without modifying state"})
 
             # Independent current engines race to initialize a fresh prefix and submit separate work.
             fresh_prefix = f"{prefix}/{mode}/concurrent-fresh"

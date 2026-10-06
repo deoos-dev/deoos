@@ -7,8 +7,20 @@ export type StorageConfig = {prefix?:string;lease_ms?:number} & (
 );
 export interface ScheduleOptions {first_due_ms?:number;missed?:'latest'|'catchup';overlap?:'skip'|'allow';max_attempts?:number;retry_ms?:number}
 interface NativeHandle {request(method:string,path:string,data:string):Promise<string>}
-export interface HistoryEvent {at_ms:number;event:string;attempts:number;generation:number;detail?:unknown}
+export interface HistoryEvent {at_ms:number;event:string;attempts:number;detail?:unknown}
 export interface Task { history?:HistoryEvent[];revision?:string;status?:string; version:number; id:string; handler:string; inputs:unknown; token:string; expires_at:number; steps:Record<string,string>;schedule?:{id:string;scheduled_at:number}|null }
+export interface TaskView {
+  id:string;
+  function:string;
+  status:ExecutionSummary['status'];
+  inputs:unknown;
+  output:unknown;
+  error:string|null;
+  attempts:number;
+  completed_steps:string[];
+  wait?:ExecutionSummary['wait'];
+}
+export interface TaskEvent {at_ms:number;event:string;detail?:string}
 export type Handler = (context:Context, inputs:any) => unknown | Promise<unknown>;
 export interface ExecutionSummary {
   summary_version:1;
@@ -86,6 +98,9 @@ export class Client {
   signal(id:string,name:string,value:unknown,operationId:string=randomUUID()){validStep(id);validStep(name);validStep(operationId);return this.request(`/tasks/${id}/signals/${name}`,{operation_id:operationId,value});}
   cancel(id:string){validStep(id);return this.request(`/tasks/${id}/cancel`,{});}
   inspect(id:string){validStep(id);return this.request(`/tasks/${id}`);}
+  /** Simple task view including application inputs/output, without coordination fields. */
+  view(id:string):Promise<TaskView>{validStep(id);return this.request(`/tasks/${id}/view`);}
+  async history(id:string):Promise<TaskEvent[]>{validStep(id);return (await this.request(`/tasks/${id}/history`)).history;}
   /** Persisted progress metadata without inputs, outputs, or checkpoint values. */
   summary(id:string):Promise<ExecutionSummary>{validStep(id);return this.request(`/tasks/${id}/summary`);}
   listTasks(){return this.request('/tasks');}

@@ -250,7 +250,7 @@ def run_workflow_case(mode, first_language, resume_language, python, node,
 
 
 WORKER_ACCEPTANCE_PYTHON = r'''
-import json, os, threading, time
+import json, os, subprocess, sys, threading, time
 from deoos import Client, EngineError
 
 c = (Client.remote(os.environ['ENGINE_URL'], os.environ.get('ENGINE_TOKEN'))
@@ -267,6 +267,17 @@ def summary(task_id, status):
     assert value['summary_version'] == 1 and value['id'] == task_id
     assert value['status'] == status and not forbidden.intersection(value), value
     assert not any(secret in json.dumps(value) for secret in secrets), value
+    view = c.view(task_id)
+    assert set(view) == {'id', 'function', 'status', 'inputs', 'output', 'error', 'attempts', 'completed_steps'} | ({'wait'} if status == 'waiting' else set()), view
+    raw = c.inspect(task_id)
+    assert view['function'] == raw['handler'] and view['status'] == status
+    for field in ('id', 'inputs', 'output', 'error', 'attempts'):
+        assert view[field] == raw[field]
+    assert view['completed_steps'] == sorted(raw['steps'])
+    assert 'generation' not in raw
+    events = c.history(task_id)
+    assert len(events) <= 32 and all(set(event) <= {'at_ms', 'event', 'detail'} for event in events)
+    assert [event['event'] for event in events] == [event['event'] for event in raw['history']]
     return value
 
 def run(handlers, stop, **options):
@@ -324,6 +335,13 @@ try:
     assert summary('drain', 'completed')['completed_steps'] == ['active']
     assert summary('after-drain', 'queued')['attempts'] == 0
     passed.append('active stop drains checkpoint and completion without another claim')
+    for arguments, expected_internal in ((['inspect', 'drain'], False), (['inspect', 'drain', '--internal'], True)):
+        inspected = json.loads(subprocess.check_output([sys.executable, '-m', 'deoos', *arguments], text=True))
+        assert ('token' in inspected) == expected_internal
+        assert ('function' in inspected) != expected_internal
+    cli_history = json.loads(subprocess.check_output([sys.executable, '-m', 'deoos', 'history', 'drain'], text=True))
+    assert cli_history == c.history('drain')
+    passed.append('simple CLI inspect; explicit internal details; separate history')
 
     # A single failing attempt is committed before the original exception escapes.
     def failing_case(task_id, callback=None, replacement=None):
@@ -484,6 +502,17 @@ async function summary(id, status) {
   assert.equal(value.status, status);
   assert(forbidden.every(key => !Object.hasOwn(value, key)));
   assert(secrets.every(secret => !JSON.stringify(value).includes(secret)));
+  const view = await c.view(id), raw = await c.inspect(id);
+  const keys = ['id','function','status','inputs','output','error','attempts','completed_steps'];
+  if (status === 'waiting') keys.push('wait');
+  assert.deepEqual(Object.keys(view).sort(), keys.sort());
+  assert.equal(view.function, raw.handler); assert.equal(view.status, status);
+  for (const field of ['id','inputs','output','error','attempts']) assert.deepEqual(view[field], raw[field]);
+  assert.deepEqual(view.completed_steps, Object.keys(raw.steps).sort());
+  assert(!Object.hasOwn(raw, 'generation'));
+  const events = await c.history(id);
+  assert(events.length <= 32 && events.every(event => Object.keys(event).every(key => ['at_ms','event','detail'].includes(key))));
+  assert.deepEqual(events.map(event => event.event), raw.history.map(event => event.event));
   return value;
 }
 const run = (handlers, stop, options = {}) => c.runWorker(handlers, {signal: stop.signal, ...options});

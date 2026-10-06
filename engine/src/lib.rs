@@ -36,6 +36,7 @@ pub struct Engine {
     active_ready: Arc<tokio::sync::Mutex<bool>>,
 }
 #[derive(Clone, Serialize, Deserialize, Debug)]
+#[serde(deny_unknown_fields)]
 struct Task {
     version: u32,
     id: String,
@@ -46,7 +47,6 @@ struct Task {
     max_attempts: u32,
     retry_ms: u64,
     available_at: u64,
-    generation: u64,
     owner: Option<String>,
     token: Option<String>,
     expires_at: u64,
@@ -75,15 +75,12 @@ struct Task {
     last_retry_fingerprint: Option<String>,
     #[serde(default)]
     active_entry_id: Option<String>,
-    #[serde(default, flatten)]
-    extra: BTreeMap<String, Value>,
 }
 #[derive(Clone, Serialize, Deserialize, Debug)]
 struct HistoryEvent {
     at_ms: u64,
     event: String,
     attempts: u32,
-    generation: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     detail: Option<String>,
 }
@@ -100,7 +97,6 @@ impl Task {
             at_ms: now(),
             event: event.into(),
             attempts: self.attempts,
-            generation: self.generation,
             detail,
         });
         if self.history.len() > 32 {
@@ -254,12 +250,8 @@ impl Engine {
             version: r.meta.version.clone(),
         };
         let bytes = r.bytes().await.map_err(storage)?;
-        let t: Task = serde_json::from_slice(&bytes).map_err(|_| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "invalid stored task".into(),
-            )
-        })?;
+        let t: Task = serde_json::from_slice(&bytes)
+            .map_err(|_| conflict("unsupported or invalid stored task"))?;
         t.validate(id)?;
         Ok((t, v))
     }
@@ -641,7 +633,9 @@ impl Engine {
                     }
                     let result_key = Key::from(format!(
                         "{}/tasks/{id}/results/{name}/{}/{}.json",
-                        self.prefix, t.generation, m.operation_id
+                        self.prefix,
+                        format!("{:x}", Sha256::digest(m.token.as_bytes())),
+                        m.operation_id
                     ));
                     let data = Bytes::from(serde_json::to_vec(&m.value).unwrap());
                     match self
@@ -808,7 +802,6 @@ async fn submit(State(e): State<Engine>, Json(s): Json<Submit>) -> ApiResult<Tas
         max_attempts: s.max_attempts,
         retry_ms: s.retry_ms,
         available_at: 0,
-        generation: 0,
         owner: None,
         token: None,
         expires_at: 0,
@@ -827,7 +820,6 @@ async fn submit(State(e): State<Engine>, Json(s): Json<Submit>) -> ApiResult<Tas
         last_retry_operation: None,
         last_retry_fingerprint: None,
         active_entry_id: Some(Uuid::new_v4().to_string()),
-        extra: BTreeMap::new(),
     };
     t.record("submit", None);
     match e.read(&t.id).await {
@@ -907,7 +899,6 @@ async fn claim(State(e): State<Engine>, Json(c): Json<Claim>) -> ApiResult<Value
             if !resuming {
                 t.attempts += 1;
             }
-            t.generation += 1;
             t.owner = Some(c.worker.clone());
             t.token = Some(Uuid::new_v4().to_string());
             t.expires_at = after_ms(e.lease_ms)?;
@@ -928,6 +919,23 @@ async fn claim(State(e): State<Engine>, Json(c): Json<Claim>) -> ApiResult<Value
 }
 async fn inspect(State(e): State<Engine>, Path(id): Path<String>) -> ApiResult<Task> {
     Ok(Json(e.read(&id).await?.0))
+}
+// The default human-facing view; storage paths and ownership metadata stay internal.
+fn task_view(t: &Task) -> Value {
+    let mut view = json!({"id":t.id, "function":t.handler, "status":t.status,
+        "inputs":t.inputs, "output":t.output, "error":t.error, "attempts":t.attempts,
+        "completed_steps":t.steps.keys().collect::<Vec<_>>()});
+    if t.status == "waiting" {
+        view["wait"] = execution_summary(t)["wait"].clone();
+    }
+    view
+}
+fn task_history(t: &Task) -> Value {
+    json!({"history":t.history.iter().map(|event| {
+        let mut value = json!({"at_ms":event.at_ms, "event":event.event});
+        if let Some(detail) = &event.detail { value["detail"] = json!(detail); }
+        value
+    }).collect::<Vec<_>>()})
 }
 // A state-only projection: never fetch checkpoint values or discover other tasks.
 fn execution_summary(t: &Task) -> Value {
@@ -1219,6 +1227,12 @@ impl Engine {
             return inspect(State(self.clone()), Path(id.into()))
                 .await
                 .map(|v| json!(v.0));
+        }
+        if method == "GET" && parts.len() == 3 && parts[2] == "view" {
+            return Ok(task_view(&self.read(id).await?.0));
+        }
+        if method == "GET" && parts.len() == 3 && parts[2] == "history" {
+            return Ok(task_history(&self.read(id).await?.0));
         }
         if method == "GET" && parts.len() == 3 && parts[2] == "summary" {
             return Ok(execution_summary(&self.read(id).await?.0));

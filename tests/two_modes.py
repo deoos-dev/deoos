@@ -133,7 +133,7 @@ try:
     time.sleep(3.1);mutate(a,old,'renew');renewed=a.inspect('stale');time.sleep(3.2);new=claim(b)
     if new is None:
      time.sleep(max(0,(renewed['expires_at']-int(time.time()*1000))/1000)+.1);new=claim(b)
-    assert new['generation']==old['generation']+1
+    assert new['token']!=old['token']
     assert [event for event in new['history'] if event['event']=='claim'][-1]['at_ms']>=renewed['expires_at']
     for action in ['renew','steps/late','complete','fail']:
      try:mutate(a,old,action)
@@ -148,7 +148,7 @@ try:
      old=a.request('/claim',dict(worker='old-context',handlers=[task_id]))['task']
      time.sleep(max(0,(old['expires_at']-int(time.time()*1000))/1000)+.05)
      replacement=b.request('/claim',dict(worker='replacement-context',handlers=[task_id]))['task']
-     assert replacement['id']==task_id and replacement['generation']==old['generation']+1 and replacement['token']!=old['token']
+     assert replacement['id']==task_id and replacement['token']!=old['token']
      assert [entry for entry in replacement['history'] if entry['event']=='claim'][-1]['at_ms']>=old['expires_at']
      replacement=mutate(b,replacement,'renew')
      python_stale="""import json,os,pathlib;from deoos import Client,Context,EngineError
@@ -587,7 +587,7 @@ else:raise AssertionError('worker did not fail')
     with cf.ThreadPoolExecutor(max_workers=2) as pool:results=list(pool.map(try_retry,enumerate(retry_clients)))
     winner,state=next((index,state) for index,state in results if state is not None)
     assert sum(state is not None for _,state in results)==1 and state['status']=='queued' and state['attempts']==0
-    assert state['steps']==failed['steps'] and state['definitions']==failed['definitions'] and state['generation']==failed['generation']
+    assert state['steps']==failed['steps'] and state['definitions']==failed['definitions']
     expect_status(409,lambda:a.request('/tasks/ops-retry/log',{'token':failed['token'],'operation_id':'stale-log','value':'must not appear'}))
     script=node_header+"await c.runOnce({'ops-retry.v1':async ctx=>{const value=await ctx.step('saved',()=>{throw new Error('checkpoint callback repeated');});await ctx.log('TypeScript resumed saved checkpoint');return value;}});const state=await c.inspect('ops-retry');if(state.status!=='completed'||state.output!==42)throw new Error('retry did not complete');if(!(await c.listTasks()).tasks.some(t=>t.id==='ops-retry'))throw new Error('listing omitted task');"
     subprocess.run(['node','--input-type=module','-e',script],cwd=ROOT,env=child_env,check=True,capture_output=True,text=True)
@@ -603,14 +603,14 @@ else:raise AssertionError('worker did not fail')
     subprocess.run(['node','--input-type=module','-e',script],cwd=ROOT,env=child_env,check=True,capture_output=True,text=True,timeout=120)
     history=a.inspect('ops-history')['history'];assert len(history)==32 and history[-1]['event']=='complete'
     assert [event['detail'] for event in history if event['event']=='log']==['entry-'+str(i) for i in range(4,35)]
-    assert all(set(event)<={'at_ms','event','attempts','generation','detail'} for event in history)
+    assert all(set(event)<={'at_ms','event','attempts','detail'} for event in history)
     # Cancellation followed by explicit retry preserves timers, signals and checkpoints.
     a.submit('ops-cancel','ops-cancel.v1',{})
     script=node_header+"await c.runOnce({'ops-cancel.v1':async ctx=>{await ctx.step('saved',()=>7);await ctx.sleep('timer',0);return ctx.waitSignal('go');}});"
     subprocess.run(['node','--input-type=module','-e',script],cwd=ROOT,env=child_env,check=True,capture_output=True,text=True)
     assert a.inspect('ops-cancel')['status']=='waiting'
     a.signal('ops-cancel','go',{'ready':True});cancelled=a.cancel('ops-cancel');reset=a.retry('ops-cancel',cancelled['revision'],'cancelled-retry')
-    for field in ['steps','definitions','timers','signals','generation']:assert reset[field]==cancelled[field],field
+    for field in ['steps','definitions','timers','signals']:assert reset[field]==cancelled[field],field
     expect_status(409,lambda:a.retry('ops-cancel',reset['revision'],'already-queued'))
     subprocess.run(['node','--input-type=module','-e',script],cwd=ROOT,env=child_env,check=True,capture_output=True,text=True)
     assert a.inspect('ops-cancel')['output']=={'ready':True}
@@ -811,10 +811,22 @@ c.close()
       listed=[obj for page in s3.get_paginator('list_objects_v2').paginate(Bucket=bucket) for obj in page.get('Contents',[]) if f'/tasks/{orphan_id}/results/' in obj['Key']]
       assert len(listed)==1,'expected one orphan upload'
       time.sleep(6.3)
-      t=a.request('/claim',dict(worker='recovery',handlers=['fault']))['task'];assert t['id']==orphan_id
-      mutate(a,t,'steps/saved',{'retried':True});mutate(a,t,'complete',True)
+      recovered=a.request('/claim',dict(worker='recovery',handlers=['fault']))['task'];assert recovered['id']==orphan_id
+      assert recovered['token']!=t['token'] and recovered['attempts']==2
+      assert 'generation' not in recovered and all('generation' not in event for event in recovered['history'])
+      # Reuse the exact operation ID with a different value in the new claim.
+      # The old immutable upload must neither collide nor become the checkpoint.
+      expect_status(409,lambda:a.request('/tasks/'+orphan_id+'/steps/saved',mutation))
+      replacement=dict(token=recovered['token'],operation_id=mutation['operation_id'],value={'retried':True})
+      a.request('/tasks/'+orphan_id+'/steps/saved',replacement)
+      saved=a.request('/tasks/'+orphan_id)
+      expected_namespace=hashlib.sha256(recovered['token'].encode()).hexdigest()
+      assert '/results/saved/'+expected_namespace+'/orphan-upload.json' in saved['steps']['saved']
+      listed=[obj for page in s3.get_paginator('list_objects_v2').paginate(Bucket=bucket) for obj in page.get('Contents',[]) if f'/tasks/{orphan_id}/results/' in obj['Key']]
+      assert len(listed)==2 and all(t['token'] not in obj['Key'] and recovered['token'] not in obj['Key'] for obj in listed)
+      mutate(a,recovered,'complete',True)
       assert a.request('/tasks/'+orphan_id+'/steps/saved')=={'retried':True}
-      passed.append('engine killed after result upload; orphan ignored and retry committed fresh result')
+      passed.append('engine killed after result upload; replacement token isolates reused operation ID and fences old claim')
       for gap in ['intent','task']:
        if mode=='server' and fault_server.poll() is not None:
         fault_server=subprocess.Popen([str(server_binary)],env=fault_env,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)

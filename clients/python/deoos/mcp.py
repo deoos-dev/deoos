@@ -240,7 +240,7 @@ class Server:
             return client.summary(task_id)
         if name == "task_history":
             task = client.inspect(task_id)
-            fields = ("at_ms", "event", "attempts", "generation", "detail")
+            fields = ("at_ms", "event", "attempts", "detail")
             return {"id": task_id, "status": task["status"], "revision": task["revision"],
                     "history": [{k: item[k] for k in fields if k in item} for item in task.get("history", [])[-32:]],
                     "bounded": True}

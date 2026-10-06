@@ -7,6 +7,13 @@ import sys
 from . import Client
 
 
+def task_view(state):
+    """Display an acknowledged mutation without a second, fallible read."""
+    return dict(id=state["id"], function=state["handler"], status=state["status"],
+                inputs=state["inputs"], output=state["output"], error=state["error"],
+                attempts=state["attempts"], completed_steps=sorted(state["steps"]))
+
+
 def main():
     parser = argparse.ArgumentParser(prog="python -m deoos")
     commands = parser.add_subparsers(dest="command", required=True)
@@ -17,6 +24,10 @@ def main():
 
     inspect = commands.add_parser("inspect", help="inspect a task")
     inspect.add_argument("id")
+    inspect.add_argument("--internal", action="store_true",
+                         help="include raw coordination and storage details")
+    history = commands.add_parser("history", help="show recent execution events")
+    history.add_argument("id")
 
     summary = commands.add_parser("summary", help="summarize progress as JSON without fetching payloads")
     summary.add_argument("id")
@@ -47,16 +58,18 @@ def main():
         if args.command == "list":
             result = client.list_tasks()
         elif args.command == "inspect":
-            result = client.inspect(args.id)
+            result = client.inspect(args.id) if args.internal else client.view(args.id)
+        elif args.command == "history":
+            result = client.history(args.id)
         elif args.command in ("summary", "explain"):
             result = client.summary(args.id)
         elif args.command == "retry":
             revision = args.revision
             if revision is None:
                 revision = client.inspect(args.id)["revision"]
-            result = client.retry(args.id, revision, args.operation_id)
+            result = task_view(client.retry(args.id, revision, args.operation_id))
         elif args.command == "cancel":
-            result = client.cancel(args.id)
+            result = task_view(client.cancel(args.id))
         elif args.action == "inspect":
             result = client.inspect_schedule(args.id)
         elif args.action == "pause":

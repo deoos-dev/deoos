@@ -149,7 +149,7 @@ with Client() as a:
     assert inventory()['external-task']['revision'] == retried['revision']
     second = claim()
     assert second['id'] == first['id']
-    assert second['token'] != first['token'] and second['generation'] > first['generation']
+    assert second['token'] != first['token']
     assert second['active_entry_id'] != first['active_entry_id']
     assert inventory()['external-task']['revision'] == second['revision']
     try:

@@ -808,7 +808,7 @@ class WorkflowCase:
         claims = [entry for entry in recovered["history"]
                   if entry["event"] == "claim" and entry["attempts"] == 2]
         assert len(claims) == 1 and claims[0]["at_ms"] >= saved_expiry
-        assert recovered["attempts"] == 2 and recovered["generation"] == crashed["generation"] + 1
+        assert recovered["attempts"] == 2 and recovered["token"] != crashed["token"]
         assert recovered["owner"] != crashed["owner"]
         assert all(state["attempts"] == 1 for state in completed[1:])
         requests, task_results = [], []

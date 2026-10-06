@@ -172,7 +172,7 @@ def case(binary, library, work, mode, inherited, new_create=False):
             assert status == (404 if mode == 'before-rename' else 200), (status, observed)
             before = successful(reader.url, '/tasks', submission)
             assert before['inputs'] == submission['inputs'] and before['handler'] == submission['handler']
-            assert before['status'] == 'queued' and before['attempts'] == before['generation'] == 0
+            assert before['status'] == 'queued' and before['attempts'] == 0
             assert before['token'] is None and before['owner'] is None and before['output'] is None
             assert before['steps'] == {} and [event['event'] for event in before['history']] == ['submit']
             if status == 200:
@@ -204,7 +204,7 @@ def case(binary, library, work, mode, inherited, new_create=False):
         elif not new_create:
             assert observed['status'] == 'running' and observed['attempts'] == 1, observed
             assert observed['owner'] == 'interrupted-owner' and observed['token'], observed
-            assert observed['generation'] == before['generation'] + 1, observed
+            assert observed['token'] != before['token'], observed
             old_token = observed['token']
             expected_attempts = 2
             delay = max(0, (observed['expires_at'] - time.time() * 1000) / 1000)
@@ -306,7 +306,7 @@ def warm_reader_case(binary, library, work, inherited):
         assert observed['status'] == 'running' and observed['attempts'] == 1, observed
         assert observed['owner'] == 'interrupted-owner' and observed['token'], observed
         assert observed['revision'] != before['revision']
-        assert observed['generation'] == before['generation'] + 1
+        assert observed['token'] != before['token']
         assert successful(reader.url, '/tasks/recovery') == observed
         delay = max(0, (observed['expires_at'] - time.time() * 1000) / 1000)
         assert delay < 5, delay

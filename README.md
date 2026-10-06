@@ -11,17 +11,17 @@ One Rust execution core, Python and TypeScript SDKs, and object storage for auth
 
 ## Install
 
-Download and unpack the release for your platform. Python 3.10+ and Node 22+ are required for their respective SDKs. No Rust compiler is needed to use the prebuilt release.
+The 0.7.0 alpha release currently ships a locally verified Mac Apple Silicon package. Other targets below were qualified in earlier releases and require fresh 0.7.0 qualification before shipping. Download and unpack the release for your platform. Python 3.10+ and Node 22+ are required for their respective SDKs. No Rust compiler is needed to use the prebuilt release.
 
 | Release target | Operating requirements | Runtime verification |
 | --- | --- | --- |
-| `macos-arm64` | macOS 11+; Apple Silicon | Both modes and SDKs on native ARM64 macOS CI |
+| `macos-arm64` | macOS 11+; Apple Silicon | 0.7.0: both modes and SDKs verified locally on Apple Silicon |
 | `macos-x64` | macOS 11+; Intel-compatible Python/Node | Both modes and SDKs on native x86_64 macOS CI |
 | `linux-arm64` | ARM64 Linux, glibc 2.28+ | Both modes and SDKs on native ARM64 Linux CI |
 | `linux-x64` | x86_64 Linux, glibc 2.28+ | Both modes and SDKs on native x86_64 Linux CI |
 | `windows-x64` | x86_64 Windows | Both modes and SDKs on Windows Server 2022 CI |
 
-Linux releases use audited `manylinux_2_28` wheels; Alpine/musl is outside these builds. Choose a Python/Node distribution compatible with your operating system. All five targets passed fresh-package installation and cross-language recovery tests against real S3 on their native architectures. Linux tests run inside pinned manylinux containers. The macOS 11 deployment target and glibc 2.28 baseline are build requirements; CI does not test every supported OS version.
+Linux releases use audited `manylinux_2_28` wheels; Alpine/musl is outside these builds. Choose a Python/Node distribution compatible with your operating system. Earlier releases passed all five targets through fresh-package installation and cross-language recovery tests against real S3 on their native architectures. Linux tests run inside pinned manylinux containers. The macOS 11 deployment target and glibc 2.28 baseline are build requirements; CI does not test every supported OS version.
 
 ```sh
 python3 -m venv .venv
@@ -30,7 +30,7 @@ python3 -m venv .venv
 npm install /path/to/release/node/*.tgz
 ```
 
-On Windows, create the environment with `python -m venv .venv` and install the wheel using `.venv\Scripts\python.exe -m pip install C:\path\to\release\python\WHEEL_FILENAME.whl`. Install the npm tarball in your Node project with `npm install C:\path\to\release\node\deoos-0.6.0.tgz`.
+On Windows, create the environment with `python -m venv .venv` and install the wheel using `.venv\Scripts\python.exe -m pip install C:\path\to\release\python\WHEEL_FILENAME.whl`. Install the npm tarball in your Node project with `npm install C:\path\to\release\node\deoos-0.7.0.tgz`.
 
 Releases contain an installable Python wheel, npm tarball, optional server executable, application examples, this guide, and checksums. Packages are not yet published to registries.
 
@@ -103,7 +103,7 @@ python -m deoos summary greeting-001
 python -m deoos inspect greeting-001
 ```
 
-`explain` presents a readable summary, `summary` emits JSON, and `inspect` returns the full stored task. Summaries report persisted status, completed step names, waits and the last retained failure. Failure history is bounded; a prior failure may disappear after manual retry and later history entries. An assigned signal or elapsed timer remains `waiting` until a worker polls. Suggested actions are snapshot hints; mutations still validate current state. Application error messages may contain sensitive information; the summary bounds and cleans their text but does not redact secrets.
+`explain` presents a readable summary, `summary` emits JSON, and `inspect` returns the simple task view. Use `inspect <id> --internal` for the full stored task, or `history <id>` for the separate event timeline. Summaries report persisted status, completed step names, waits and the last retained failure. Failure history is bounded; a prior failure may disappear after manual retry and later history entries. An assigned signal or elapsed timer remains `waiting` until a worker polls. Suggested actions are snapshot hints; mutations still validate current state. Application error messages may contain sensitive information; the summary bounds and cleans their text but does not redact secrets.
 
 ## Shared-server mode
 
@@ -248,7 +248,7 @@ For a local application configure `AWS_ENDPOINT=http://127.0.0.1:19000`, `AWS_AL
 
 ## Guarantees and current scope
 
-Each task has `<prefix>/tasks/<id>/state.json`. Checkpoint results are immutable objects under `<prefix>/tasks/<id>/results/<step>/<generation>/<operation_id>.json`. State creation uses If-None-Match; replacements use If-Match. A checkpoint is committed when its result reference is in state; orphan uploads are ignored. ETag conditions fence old generations. A successful write with a lost response is reconciled by its unique revision. Repeated mutation acknowledgment is bounded to the last operation and requires an identical request.
+Each task has `<prefix>/tasks/<id>/state.json`. Checkpoint results are immutable objects under `<prefix>/tasks/<id>/results/<step>/<ownership-token-hash>/<operation_id>.json`. State creation uses If-None-Match; replacements use If-Match. A checkpoint is committed when its result reference is in state; orphan uploads are ignored. ETag conditions fence old workers. A successful write with a lost response is reconciled by its unique revision. Repeated mutation acknowledgment is bounded to the last operation and requires an identical request.
 
 Timer deadlines and waiting conditions live in the task state. Signal payloads live at `<prefix>/tasks/<id>/signals/<name>/<operation_id>.json`; assignment commits when the state references that payload. Suspension and signal assignment share the same conditional state object, preventing lost wakeups.
 
@@ -277,7 +277,9 @@ python -m deoos cancel invoice-123
 python -m deoos schedule pause daily-import
 ```
 
-For the UI, start the shared server and open `http://127.0.0.1:7331/ui` (or your configured address). Enter its token and connect. Task listing, ID lookup, history, manual retry/cancel, schedule inspection and pause/resume use the same API. Token storage is confined to page memory and refresh is manual. The UI shell is public; API access follows server authentication. Browser API requests must come from the server’s own origin; HTTP mutations require `application/json`. Origin-less SDK/CLI requests are supported. Library users can run the shared server against the same bucket/prefix for inspection, using the existing second deployment mode.
+Use `engine.view(id)` in either SDK for a simple task view (ID, function, status, inputs, output, error, attempts, completed steps; wait condition when waiting). `engine.history(id)` returns the last 32 events separately. `engine.inspect(id)` remains explicit raw internal inspection. Unlike the payload-free `summary`, the view includes application inputs and output.
+
+For the UI, start the shared server and open `http://127.0.0.1:7331/ui` (or your configured address). Enter its token and connect. Task listing, ID lookup, a small default view, separate history, collapsed Internal details, manual retry/cancel, schedule inspection and pause/resume use the same API. Token storage is confined to page memory and refresh is manual. The UI shell is public; API access follows server authentication. Browser API requests must come from the server’s own origin; HTTP mutations require `application/json`. Origin-less SDK/CLI requests are supported. Library users can run the shared server against the same bucket/prefix for inspection, using the existing second deployment mode.
 
 ## MCP
 
@@ -436,10 +438,12 @@ Use handler names such as `process_order.v1` and `process_order.v2`. A task's ha
 
 Every named operation declares its kind and definition before reading a checkpoint or doing work. Spawn inputs, ordered join dependencies and timer durations must match their original definitions. Ordinary callbacks declare a revision: `ctx.step("charge", charge, revision="1")` in Python, or `ctx.step("charge", charge, "1")` in TypeScript. Change the handler version and declared revision when callback semantics or result shape change. The engine verifies declared compatibility; it cannot detect arbitrary changes inside your code. A mismatch fails before consuming a cached value or executing the callback. It follows the configured failure/retry policy and can spend attempts; committed values remain available.
 
-This alpha provides no compatibility or migration across engine storage layouts. Deploy matching engine and SDK packages together, use a fresh execution prefix when the storage layout changes, and do not mix older engine binaries with the current deployment. Mutating SDK calls check engine protocol before dispatch, and the engine rejects unsupported clients and stored tasks before changing them. Keep each service URL on one protocol version throughout its deployment. Unknown task fields are preserved for metadata additions.
+This alpha provides no compatibility or migration across engine storage layouts. Deploy matching engine and SDK packages together, use a fresh execution prefix when the storage layout changes, and do not mix older engine binaries with the current deployment. Mutating SDK calls check engine protocol before dispatch, and the engine rejects unsupported clients and stored tasks before changing them. Keep each service URL on one protocol version throughout its deployment. Unknown stored task fields are rejected.
 
 Functions restart from the top on recovery; named steps return committed values. External effects can repeat before a checkpoint commits: destinations must enforce `ctx.idempotency_key(name)` / `ctx.idempotencyKey(name)` for effect deduplication. Workers must have synchronized clocks. Lease expiry cannot interrupt application code or an already dispatched network request; a replacement owner's conditional state write prevents the stale owner from committing over it. Keep checkpoint names and handler semantics compatible with active executions. Checkpoint callbacks are sequential within a task; child tasks may execute concurrently. Node CPU work must not block renewal timers.
 
-This alpha supports claims, leases, checkpoints, retries, recovery, child-task composition, timers, signals, cancellation, declared code/checkpoint compatibility and interval schedules/backfills. Task inspection, bounded history, manual retry, a small shared-server UI, paired complete application examples and measured discovery/request costs are included. No production HA, tenant isolation, garbage collection or application throughput guarantee is claimed.
+This alpha supports claims, leases, checkpoints, retries, recovery, child-task composition, timers, signals, cancellation, declared code/checkpoint compatibility and interval schedules/backfills. A simple task view, separate bounded history, explicit internal inspection, manual retry, a small shared-server UI, paired complete application examples and measured discovery/request costs are included. No production HA, tenant isolation, garbage collection or application throughput guarantee is claimed.
 
-macOS Apple Silicon remains the primary development platform. Native CI has verified both modes and SDKs for all five targets above, including worker replacement, shared-server restart, persisted timer/signal waits and cross-language recovery.
+macOS Apple Silicon remains the primary development platform. Earlier-release native CI verified both modes and SDKs for all five targets above; 0.7.0 is currently qualified locally on Mac ARM64, including worker replacement, shared-server restart, persisted timer/signal waits and cross-language recovery.
+
+The internal task-field audit removed the ownership counter (`generation`) and arbitrary unknown-field preservation. Checkpoint uploads are isolated by a hash of the existing ownership token. The token, lease deadline and conditional state writes fence old workers; no second ownership counter is needed. The worker ID remains only for diagnostics. Worker-update receipts and manual-retry receipts remain separate because later claims must not erase an earlier acknowledged manual retry.

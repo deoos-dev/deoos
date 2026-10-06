@@ -293,7 +293,7 @@ async def fault_case(binary, python, base, work, library, mode):
     work.mkdir()
     prefix = 'mcp-fault-' + uuid.uuid4().hex
     storage, arm, marker = work / 'storage', work / 'arm', work / 'marker'
-    target_options = fault_target(storage, f'{prefix}/tasks/pending/state.json', 'v2')
+    target_options = fault_target(storage, f'{prefix}/tasks/pending/state.json')
     env = dict(base, DEOOS_STORAGE_PROVIDER='filesystem', DEOOS_STORAGE_DIRECTORY=str(storage),
                EXECUTION_PREFIX=prefix, DYLD_INSERT_LIBRARIES=str(library),
                **target_options, DEOOS_FAULT_ARM=str(arm),
@@ -302,7 +302,7 @@ async def fault_case(binary, python, base, work, library, mode):
     server = await anyio.to_thread.run_sync(Server, binary, env, work / 'engine.log')
     client_env = remote_env(env, server)
     try:
-        assert_layout(storage, 'v2')
+        assert_layout(storage)
         await anyio.to_thread.run_sync(sdk, python, client_env,
                                       "c.submit('pending', 'pending.v1', {}); print(json.dumps(True))")
         if mode.startswith('closed-output'):
