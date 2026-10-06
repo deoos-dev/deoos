@@ -25,8 +25,8 @@ def main():
 
     retry = commands.add_parser("retry", help="retry a failed or cancelled task")
     retry.add_argument("id")
-    retry.add_argument("--revision", help="expected revision; defaults to the current revision")
-    retry.add_argument("--operation-id", help="stable ID for retrying an uncertain request")
+    retry.add_argument("--revision", help="expected revision; defaults to current; reuse the original revision after an uncertain request")
+    retry.add_argument("--operation-id", help="stable ID; reuse with the original --revision after an uncertain request")
 
     cancel = commands.add_parser("cancel", help="cancel a task")
     cancel.add_argument("id")
