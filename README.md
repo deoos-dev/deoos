@@ -34,6 +34,8 @@ On Windows, create the environment with `python -m venv .venv` and install the w
 
 Releases contain an installable Python wheel, npm tarball, optional server executable, application examples, this guide, and checksums. Packages are not yet published to registries.
 
+Before starting workers, run `/path/to/release/bin/deoos-server --check-storage` (`bin/deoos-server.exe` on Windows) with your intended storage configuration. It exits after checking the conditional-write primitives; it does not start a server. A missing or incompatible embedded library points to the platform release package and explains how to check a native-library override. Shared-server clients use `Client.remote(...)` and do not load the embedded engine.
+
 ## Library mode
 
 Configure `DEOOS_STORAGE_PROVIDER` and `DEOOS_STORAGE_BUCKET`, plus your provider's credentials. For AWS S3, set `AWS_REGION`; temporary credentials also need `AWS_SESSION_TOKEN`. Explicit storage settings can also be passed to Client. Each execution worker uses the same bucket and prefix.

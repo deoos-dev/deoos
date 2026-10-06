@@ -49,7 +49,12 @@ export class Client {
   constructor(config:StorageConfig|string, private token?:string) {
     if(typeof config==='string') this.url=config.replace(/\/$/,'');
     else {
-      const addon=require(process.env.DEOOS_NODE_LIBRARY??'./native/deoos_node.node');
+      let addon;
+      try {
+        addon=require(process.env.DEOOS_NODE_LIBRARY??'./native/deoos_node.node');
+      } catch(error) {
+        throw new Error('Cannot load the embedded DEOOS engine. Install the prebuilt npm package from the release for your operating system and CPU architecture, using Node 22 or newer. If DEOOS_NODE_LIBRARY is set, check that it points to a compatible addon. To connect to a shared server, use Client.remote(url, token).',{cause:error});
+      }
       this.native=new addon.NativeEngine(JSON.stringify({...config,prefix:config.prefix??process.env.EXECUTION_PREFIX??"durable-v3",lease_ms:config.lease_ms??Number(process.env.LEASE_MS??30000)}));
     }
   }
