@@ -73,6 +73,8 @@ await engine.runOnce({greet: async (ctx, inputs) =>
 
 `run_once`/`runOnce` executes one available task. Your application decides when to poll again. Rust runs inside the worker; no execution server is started.
 
+Python threads can share an embedded `Client` and make independent native requests concurrently. Stop and join worker threads before closing the client. `close()` rejects new requests and waits for admitted requests to finish; calling it from inside an active native request on the same thread raises an error instead of waiting on itself.
+
 For a continuous worker, the application supplies its shutdown event or signal:
 
 ```python
