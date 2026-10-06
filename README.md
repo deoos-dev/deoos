@@ -222,6 +222,8 @@ Backfill ranges are `[start_ms, end_ms)`, aligned to the cadence and at or after
 
 ## Build and verify
 
+Run development checks locally. GitHub Actions is manual-only; start a run only when explicitly requested by the project owner. Reserve the full platform matrix for release qualification.
+
 Source builds need Rust 1.93+, a C compiler, Node 22+ and Python 3.10+. Windows native builds require MSVC build tools. Docker Compose is needed for local RustFS tests. From the repo on macOS/Linux:
 
 ```sh
