@@ -9,6 +9,8 @@
 //! A writer dying after rename therefore cannot turn an uncertain publication
 //! into a successful, but non-durable, read. Certified reads are not new fsync
 //! health probes; writes always perform their durability barriers.
+//! Root, objects, locks and bootstrap must share one local APFS filesystem.
+//! Mounting over or replacing store paths while clients are open is unsupported.
 use std::{
     collections::{BTreeSet, HashMap},
     fmt,
@@ -145,6 +147,7 @@ impl LocalObjectStore {
         let bootstrap = store.bootstrap()?;
         create_private_dir(&store.root.join("objects"))?;
         create_private_dir(&store.root.join("locks"))?;
+        check_same_filesystem(root, &bootstrap)?;
         sync_dir(&store.root.join("objects")).map_err(durability)?;
         sync_dir(&store.root.join("locks")).map_err(durability)?;
         // Flush all ancestor directory entries too: an earlier initializer may
@@ -634,6 +637,35 @@ fn check_filesystem(path: &FsPath) -> Result<()> {
 }
 #[cfg(not(target_os = "macos"))]
 fn check_filesystem(_: &FsPath) -> Result<()> {
+    platform_supported()
+}
+#[cfg(target_os = "macos")]
+fn check_same_filesystem(root: &FsPath, bootstrap: &File) -> Result<()> {
+    use std::os::unix::fs::MetadataExt;
+    // check_filesystem(root) established local APFS. st_dev identifies its
+    // mounted filesystem; paths beneath a directory can still be mount points.
+    let root_file = secure_options().read(true).open(root).map_err(generic)?;
+    let device = root_file.metadata().map_err(generic)?.dev();
+    let check = |file: &File| -> Result<()> {
+        if file.metadata().map_err(generic)?.dev() != device {
+            return Err(unsupported(
+                "local store root, objects, locks, and bootstrap must be on the same APFS filesystem; nested mounts are unsupported",
+            ));
+        }
+        Ok(())
+    };
+    check(bootstrap)?;
+    for name in ["objects", "locks"] {
+        let file = secure_options()
+            .read(true)
+            .open(root.join(name))
+            .map_err(generic)?;
+        check(&file)?;
+    }
+    Ok(())
+}
+#[cfg(not(target_os = "macos"))]
+fn check_same_filesystem(_: &FsPath, _: &File) -> Result<()> {
     platform_supported()
 }
 #[cfg(target_os = "macos")]

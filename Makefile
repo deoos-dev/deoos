@@ -33,7 +33,7 @@ test-package:
 
 test-filesystem: package
 	$(TEST_PYTHON) tests/package_smoke.py --backend filesystem
-	$(TEST_PYTHON) tests/local_faults.py --binary engine/target/release/deoos-engine
+	$(TEST_PYTHON) tests/local_faults.py --binary engine/target/release/deoos-engine --mounts
 
 clean-local:
 	docker compose down -v

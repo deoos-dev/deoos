@@ -16,6 +16,10 @@ import json
 import os
 import pathlib
 import platform
+import plistlib
+import re
+import shutil
+import stat
 import signal
 import socket
 import subprocess
@@ -299,19 +303,229 @@ def run_faults(binary, inherited=None):
     return report
 
 
+
+def run_mounts(binary, report):
+    """Real nested APFS mounts; retain all artifacts unless detach is verified."""
+    assert platform.system() == 'Darwin' and platform.machine() == 'arm64'
+    binary = pathlib.Path(binary).resolve(strict=True)
+    evidence = ROOT.parent / 'outputs/evidence'
+    evidence.mkdir(parents=True, exist_ok=True)
+    # Never use automatic recursive cleanup around a possibly live mount.
+    work = pathlib.Path(tempfile.mkdtemp(prefix='deoos-apfs-mounts-', dir=evidence)).resolve()
+    os.chmod(work, 0o700)
+    result = {'mode': 'nested-apfs-mounts', 'work': str(work), 'checks': [],
+              'commands': [], 'cleaned': False, 'retained_artifacts': False,
+              'scope': 'Real constructor rejection of pre-existing nested APFS mounts; no live-remount or physical power-loss proof',
+              'binary_sha256': hashlib.sha256(binary.read_bytes()).hexdigest()}
+    report['checks'].append(result)
+    report['cleaned'] = False
+    cases = []
+
+    def command(argv, timeout=30):
+        started = time.monotonic()
+        entry = {'argv': [str(a) for a in argv]}
+        result['commands'].append(entry)
+        try:
+            completed = subprocess.run(entry['argv'], cwd=work, capture_output=True, timeout=timeout)
+        except BaseException as error:
+            entry.update(error=f'{type(error).__name__}: {error}', elapsed_seconds=time.monotonic()-started)
+            raise
+        entry.update(returncode=completed.returncode, elapsed_seconds=time.monotonic()-started,
+                     stdout_bytes=len(completed.stdout), stdout_sha256=hashlib.sha256(completed.stdout).hexdigest(),
+                     stderr=completed.stderr.decode(errors='replace')[:8192])
+        assert completed.returncode == 0, entry
+        return completed.stdout
+
+    def info():
+        return plistlib.loads(command(['/usr/bin/hdiutil', 'info', '-plist']))
+
+    def attachment(case, snapshot):
+        images = [image for image in snapshot.get('images', [])
+                  if image.get('image-path') == str(case['image'])]
+        assert len(images) <= 1, f'ambiguous owned image attachment: {case["image"]}'
+        for image in snapshot.get('images', []):
+            for entity in image.get('system-entities', []):
+                if entity.get('mount-point') == str(case['mount']) and image not in images:
+                    raise AssertionError(f'owned mountpoint belongs to an unexpected image: {case["mount"]}')
+        if not images:
+            return None
+        image = images[0]
+        mounted = [entity for entity in image.get('system-entities', []) if entity.get('mount-point')]
+        assert all(entity['mount-point'] == str(case['mount']) for entity in mounted), image
+        # APFS also has a synthesized whole container disk. Detach only the
+        # unique image-owned partition-map device, never guess a disk number.
+        whole = [entity['dev-entry'] for entity in image.get('system-entities', [])
+                 if re.fullmatch(r'/dev/disk[0-9]+', entity.get('dev-entry', ''))
+                 and entity.get('content-hint') in ('GUID_partition_scheme', 'Apple_partition_scheme')]
+        assert len(whole) == 1, f'no unambiguous owned whole device: {image}'
+        return image, whole[0], mounted
+
+    def unmounted(case, snapshot):
+        assert attachment(case, snapshot) is None, f'owned image still attached: {case["image"]}'
+        for directory in ('objects', 'locks'):
+            path = case['root'] / directory
+            if path.exists():
+                assert not os.path.ismount(path) and path.stat().st_dev == case['root'].stat().st_dev, path
+
+    def detach_verified(case):
+        # Query independently even when attach failed/timed out or its plist
+        # could not be parsed. A successful mount may precede either failure.
+        snapshot = info()
+        found = attachment(case, snapshot)
+        if found:
+            image, device, _ = found
+            case['evidence']['cleanup_attachment'] = image
+            device_info = plistlib.loads(command(['/usr/sbin/diskutil', 'info', '-plist', device]))
+            assert device_info.get('WholeDisk') is True and device_info.get('DeviceNode') == device, device_info
+            # Revalidate ownership immediately before the only detach action.
+            latest = attachment(case, info())
+            assert latest is not None and latest[1] == device, 'owned attachment changed before detach'
+            command(['/usr/bin/hdiutil', 'detach', device])
+            case['evidence']['detached_whole_device'] = device
+            case['detach_confirmed'] = True
+        elif case['attach_started'] and not case.get('detach_confirmed'):
+            # A failed/timed-out attachment with no currently visible device
+            # could still be settling in a system helper. Retain rather than
+            # deleting its image or recursively traversing its mountpoint.
+            raise AssertionError(f'attachment outcome is not confirmed; retain {case["image"]}')
+        unmounted(case, info())
+        case['evidence']['attachment_absence_verified'] = True
+
+    def detach(case):
+        # Ambiguity or a failed detach is sticky: never retry an action and
+        # subsequently erase the evidence of an uncertain cleanup outcome.
+        if case.get('cleanup_uncertain'):
+            raise RuntimeError(case['cleanup_uncertain'])
+        try:
+            detach_verified(case)
+        except BaseException as error:
+            case['cleanup_uncertain'] = f'{type(error).__name__}: {error}'
+            case['evidence']['cleanup_uncertain'] = case['cleanup_uncertain']
+            raise
+
+    def private(path):
+        observed = path.lstat()
+        assert stat.S_ISDIR(observed.st_mode) and observed.st_uid == os.getuid()
+        assert stat.S_IMODE(observed.st_mode) == 0o700, (str(path), oct(stat.S_IMODE(observed.st_mode)))
+        return {'path': str(path), 'uid': observed.st_uid, 'mode': '0700', 'device': observed.st_dev}
+
+    def probe(root):
+        env = {key: value for key, value in os.environ.items()
+               if not key.startswith(('AWS_', 'DEOOS_STORAGE_', 'DEOOS_FAULT_', 'DYLD_'))
+               and key not in {'ENGINE_URL', 'ENGINE_TOKEN', 'ENGINE_BIND', 'DEOOS_MODE', 'LEASE_MS'}}
+        env.update(DEOOS_STORAGE_PROVIDER='filesystem', DEOOS_STORAGE_DIRECTORY=str(root),
+                   EXECUTION_PREFIX='mount-proof-' + uuid.uuid4().hex)
+        started = time.monotonic()
+        completed = subprocess.run([str(binary), '--check-storage'], cwd=work, env=env,
+                                   capture_output=True, text=True, timeout=30)
+        return {'returncode': completed.returncode, 'stdout': completed.stdout,
+                'stderr': completed.stderr, 'elapsed_seconds': time.monotonic()-started}
+
+    try:
+        baseline = work / 'ordinary'
+        baseline.mkdir(mode=0o700)
+        result['ordinary_baseline'] = probe(baseline)
+        assert result['ordinary_baseline']['returncode'] == 0, result['ordinary_baseline']
+        # A successful real filesystem qualification establishes that this
+        # host root passes the adapter's local APFS and permission checks.
+        for namespace in ('objects', 'locks'):
+            root = work / (namespace + '-case')
+            root.mkdir(mode=0o700)
+            for name in ('objects', 'locks'):
+                (root / name).mkdir(mode=0o700)
+            image, mount = work / (namespace + '.sparseimage'), root / namespace
+            row = {'namespace': namespace, 'image': str(image), 'mountpoint': str(mount)}
+            result['checks'].append(row)
+            case = dict(root=root, image=image, mount=mount, attach_started=False, evidence=row)
+            cases.append(case)
+            try:
+                command(['/usr/bin/hdiutil', 'create', '-size', '256m', '-type', 'SPARSE', '-fs', 'APFS',
+                         '-volname', 'deoos-guard-' + uuid.uuid4().hex, '-uid', str(os.getuid()),
+                         '-gid', str(os.getgid()), '-mode', '0700', image], timeout=60)
+                case['attach_started'] = True
+                attached = command(['/usr/bin/hdiutil', 'attach', '-plist', '-nobrowse', '-owners', 'on',
+                                    '-mountpoint', mount, image], timeout=60)
+                row['attach_plist'] = plistlib.loads(attached)
+                found = attachment(case, info())
+                assert found is not None and len(found[2]) == 1, found
+                row['verified_attachment'] = found[0]
+                volume = plistlib.loads(command(['/usr/sbin/diskutil', 'info', '-plist', found[2][0]['dev-entry']]))
+                assert str(volume.get('FilesystemType', '')).lower() == 'apfs', volume
+                assert volume.get('MountPoint') == str(mount) and os.path.ismount(mount), volume
+                row['volume_info'] = {key: volume.get(key) for key in ('DeviceNode', 'FilesystemType', 'MountPoint')}
+                # hdiutil's -mode does not set the APFS volume-root mode on
+                # every macOS build. This is our exact verified image/mount;
+                # require its owner before setting the private store mode.
+                assert mount.stat().st_uid == os.getuid(), mount
+                row['mounted_mode_before'] = oct(stat.S_IMODE(mount.stat().st_mode))
+                mount.chmod(0o700)
+                row['directories'] = [private(root), private(root / 'objects'), private(root / 'locks')]
+                assert mount.stat().st_dev != root.stat().st_dev, 'test did not create a different filesystem'
+                sibling = root / ('locks' if namespace == 'objects' else 'objects')
+                assert sibling.stat().st_dev == root.stat().st_dev
+                row['rejection'] = probe(root)
+                assert row['rejection']['returncode'] == 1, row['rejection']
+                diagnostic = 'must be on the same APFS filesystem; nested mounts are unsupported'
+                assert diagnostic in row['rejection']['stderr'], row['rejection']
+                row['objects_entries'] = sorted(entry.name for entry in (root / 'objects').iterdir())
+                assert not any(re.fullmatch(r'[0-9a-f]{64}', name) for name in row['objects_entries']), row
+                row['no_committed_envelopes'] = True
+            finally:
+                detach(case)
+            row['post_detach'] = probe(root)
+            assert row['post_detach']['returncode'] == 0, row['post_detach']
+    except BaseException as error:
+        result['error'] = f'{type(error).__name__}: {error}'
+        raise
+    finally:
+        cleanup_errors = []
+        for case in cases:
+            try:
+                detach(case)
+            except BaseException as error:
+                cleanup_errors.append(f'{case["image"]}: {type(error).__name__}: {error}')
+        try:
+            snapshot = info()
+            for case in cases:
+                unmounted(case, snapshot)
+            # Reject even an unexpected attachment within this owned tree.
+            assert not any(entity.get('mount-point', '').startswith(str(work) + '/')
+                           for image in snapshot.get('images', []) for entity in image.get('system-entities', []))
+            private(work)
+        except BaseException as error:
+            cleanup_errors.append(f'final ownership/absence check: {type(error).__name__}: {error}')
+        if cleanup_errors:
+            result.update(cleanup_errors=cleanup_errors, retained_artifacts=True)
+            raise RuntimeError(f'mount cleanup uncertain; retained {work}: ' + '; '.join(cleanup_errors))
+        try:
+            shutil.rmtree(work)
+        except BaseException as error:
+            result.update(retained_artifacts=True, cleanup_errors=[f'removing {work}: {type(error).__name__}: {error}'])
+            raise
+        result['cleaned'] = not work.exists()
+        report['cleaned'] = result['cleaned']
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--binary', required=True)
+    parser.add_argument('--mounts', action='store_true',
+                        help='also qualify real owned nested APFS mounts without sudo')
     parser.add_argument('--report', type=pathlib.Path,
                         default=ROOT.parent / 'outputs/evidence/local-storage-faults.json')
     args = parser.parse_args()
     args.report.parent.mkdir(parents=True, exist_ok=True)
+    report = {'checks': [], 'cleaned': False}
     try:
         report = run_faults(args.binary)
+        report['binary_sha256'] = hashlib.sha256(pathlib.Path(args.binary).read_bytes()).hexdigest()
+        if args.mounts:
+            run_mounts(args.binary, report)
     except BaseException as error:
-        args.report.write_text(json.dumps({'error': f'{type(error).__name__}: {error}'}, indent=2) + '\n')
+        report['error'] = f'{type(error).__name__}: {error}'
         raise
-    args.report.write_text(json.dumps(report, indent=2) + '\n')
+    finally:
+        args.report.write_text(json.dumps(report, indent=2) + '\n')
     print(json.dumps(report, indent=2))
 
 

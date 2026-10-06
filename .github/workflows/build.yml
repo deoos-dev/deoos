@@ -182,7 +182,7 @@ jobs:
         timeout-minutes: 15
         run: |
           python tests/package_smoke.py --backend filesystem
-          python tests/local_faults.py --binary engine/target/release/deoos-engine
+          python tests/local_faults.py --binary engine/target/release/deoos-engine --mounts
           python -m pip install ../outputs/deoos-*/python/*.whl
           python tests/mcp_behavior.py --binary engine/target/release/deoos-engine --backend filesystem --faults --report ../outputs/evidence/mcp-filesystem.json
       - name: Validate required AWS account configuration
