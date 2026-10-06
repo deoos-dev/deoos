@@ -2,8 +2,8 @@
 
 Compile a test-only DYLD interposer, then launch the supplied engine binary in
 owned temporary directories. Exercise a failed post-rename directory fsync and
-SIGKILL immediately before/after a state-envelope rename. This proves response
-and process-recovery behavior. A persistent warmed reader also receives a failed
+SIGKILL immediately before/after a state-envelope rename, for both a first task
+submission and a claim. This proves response and process-recovery behavior. A persistent warmed reader also receives a failed
 barrier for an external writer's newly published version. These are not physical
 power-loss tests.
 
@@ -97,7 +97,7 @@ def wait_marker(marker, server):
     return marker.read_text()
 
 
-def case(binary, library, work, mode, inherited):
+def case(binary, library, work, mode, inherited, new_create=False):
     work.mkdir()
     storage = work / 'storage'
     prefix = 'fault-' + uuid.uuid4().hex
@@ -115,14 +115,19 @@ def case(binary, library, work, mode, inherited):
                      DEOOS_FAULT_MARKER=str(marker), DEOOS_FAULT_MODE=mode)
     server = Server(binary, fault_env, work / 'fault-server.log')
     claim = {'worker': 'interrupted-owner', 'handlers': ['recovery.v1']}
-    result = {'mode': mode}
+    result = {'mode': 'new-create-' + mode if new_create else mode}
+    submission = {'id': 'recovery', 'handler': 'recovery.v1',
+                  'inputs': {'sentinel': [1, 2, 3]}, 'max_attempts': 3}
     try:
-        before = successful(server.url, '/tasks', {'id': 'recovery',
-                            'handler': 'recovery.v1', 'inputs': {'sentinel': [1, 2, 3]},
-                            'max_attempts': 3})
+        if new_create:
+            assert request(server.url, '/tasks/recovery')[0] == 404
+            before = None
+        else:
+            before = successful(server.url, '/tasks', submission)
         arm.write_text('armed')
+        route, body = ('/tasks', submission) if new_create else ('/claim', claim)
         if mode == 'fail-sync':
-            status, response = request(server.url, '/claim', claim)
+            status, response = request(server.url, route, body)
             assert status == 507, (status, response)
             assert 'durability' in response and 'uncertain' in response, response
             assert wait_marker(marker, server) == 'after-rename-directory-fsync-EIO'
@@ -130,7 +135,7 @@ def case(binary, library, work, mode, inherited):
             result['reconciliation_did_not_mask_failure'] = True
         else:
             with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-                pending = pool.submit(request, server.url, '/claim', claim)
+                pending = pool.submit(request, server.url, route, body)
                 assert wait_marker(marker, server) == mode
                 server.process.kill()
                 server.process.wait(timeout=10)
@@ -149,15 +154,41 @@ def case(binary, library, work, mode, inherited):
     # Its read must stabilize the visible envelope before reporting success.
     reader = Server(binary, env, work / 'recovery-server.log')
     try:
-        observed = successful(reader.url, '/tasks/recovery')
-        assert observed['inputs'] == before['inputs'], observed
-        assert observed['handler'] == before['handler'], observed
-        if mode == 'before-rename':
+        if new_create:
+            status, observed = request(reader.url, '/tasks/recovery')
+            assert status == (404 if mode == 'before-rename' else 200), (status, observed)
+            before = successful(reader.url, '/tasks', submission)
+            assert before['inputs'] == submission['inputs'] and before['handler'] == submission['handler']
+            assert before['status'] == 'queued' and before['attempts'] == before['generation'] == 0
+            assert before['token'] is None and before['owner'] is None and before['output'] is None
+            assert before['steps'] == {} and [event['event'] for event in before['history']] == ['submit']
+            if status == 200:
+                assert observed == before, (observed, before)
+            # Replay the uncertain submission without duplicating or replacing
+            # its definition. All observations use a fresh, unfaulted engine.
+            for _ in range(2):
+                assert successful(reader.url, '/tasks', submission) == before
+            listed = successful(reader.url, '/tasks')
+            assert not listed['truncated'] and listed['tasks'] == [before], listed
+            original = successful(reader.url, '/claim', claim)['task']
+            assert original is not None and original['attempts'] == 1 and original['token'], original
+            old_token = original['token']
+            expected_attempts = 2
+            delay = max(0, (original['expires_at'] - time.time() * 1000) / 1000)
+            assert delay < 5, delay
+            time.sleep(delay + .05)
+            result.update(initial_recovery_status=status, whole_queued_state=True,
+                          identical_submit_replay=True, one_task=True)
+        else:
+            observed = successful(reader.url, '/tasks/recovery')
+            assert observed['inputs'] == before['inputs'], observed
+            assert observed['handler'] == before['handler'], observed
+        if not new_create and mode == 'before-rename':
             assert observed == before, (before, observed)
             expected_attempts = 1
             old_token = None
             result['prior_state_preserved'] = True
-        else:
+        elif not new_create:
             assert observed['status'] == 'running' and observed['attempts'] == 1, observed
             assert observed['owner'] == 'interrupted-owner' and observed['token'], observed
             assert observed['generation'] == before['generation'] + 1, observed
@@ -181,6 +212,11 @@ def case(binary, library, work, mode, inherited):
             'value': {'recovered': True}})
         assert completed['status'] == 'completed' and completed['output'] == {'recovered': True}
         result.update(recovered_status=completed['status'], attempts=completed['attempts'])
+        if new_create:
+            listed = successful(reader.url, '/tasks')
+            assert not listed['truncated'] and listed['tasks'] == [completed], listed
+            assert successful(reader.url, '/claim', claim)['task'] is None
+            result['one_final_completed_task'] = True
     finally:
         reader.close()
     return result
@@ -298,6 +334,9 @@ def run_faults(binary, inherited=None):
         for mode in ('before-rename', 'after-rename', 'fail-sync'):
             report['checks'].append(case(binary, library, work / mode, mode, inherited))
         report['checks'].append(warm_reader_case(binary, library, work / 'warm-reader', inherited))
+        for mode in ('before-rename', 'after-rename', 'fail-sync'):
+            report['checks'].append(case(binary, library, work / ('new-create-' + mode),
+                                         mode, inherited, new_create=True))
     assert not pathlib.Path(temporary).exists(), 'fault-test temporary files survived cleanup'
     report['cleaned'] = True
     return report
