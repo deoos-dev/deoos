@@ -201,6 +201,8 @@ def package(label: str, suffix: str, npm_os: str, npm_cpu: str, explicit_target:
     node_out.mkdir()
     shutil.copy2(server, release / "bin" / ("deoos-server.exe" if npm_os == "win32" else "deoos-server"))
     shutil.copy2(ROOT / "README.md", release / "README.md")
+    shutil.copy2(ROOT / "LICENSE", release / "LICENSE")
+    shutil.copytree(ROOT / "docs", release / "docs")
     examples = release / "examples"
     examples.mkdir()
     for name in ("README.md", "library_python.py", "library_typescript.mjs", "server_python.py", "server_typescript.mjs", "workflow_python.py", "workflow_typescript.mjs", "use_cases.py", "use_cases.mjs"):
@@ -210,6 +212,7 @@ def package(label: str, suffix: str, npm_os: str, npm_cpu: str, explicit_target:
         stage = pathlib.Path(temp)
         for name in ("pyproject.toml", "setup.py"):
             shutil.copy2(PYTHON_PACKAGE / name, stage / name)
+        shutil.copy2(ROOT / "LICENSE", stage / "LICENSE")
         shutil.copytree(PYTHON_PACKAGE / "deoos", stage / "deoos", ignore=shutil.ignore_patterns("native", "__pycache__", "*.pyc"))
         native = stage / "deoos/native"
         native.mkdir()
@@ -223,6 +226,7 @@ def package(label: str, suffix: str, npm_os: str, npm_cpu: str, explicit_target:
     with tempfile.TemporaryDirectory(prefix="deoos-npm-") as temp:
         stage = pathlib.Path(temp)
         shutil.copytree(NODE_PACKAGE / "dist", stage / "dist")
+        shutil.copy2(ROOT / "LICENSE", stage / "LICENSE")
         manifest = json.loads((NODE_PACKAGE / "package.json").read_text())
         manifest["os"], manifest["cpu"] = [npm_os], [npm_cpu]
         (stage / "package.json").write_text(json.dumps(manifest, indent=2) + "\n")

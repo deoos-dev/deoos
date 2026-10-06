@@ -1,4 +1,4 @@
-"""Worker SDK: in-process library or explicit shared-server connection."""
+"""Worker SDK: library mode or an explicit server-mode connection."""
 import hashlib
 import json
 import math
@@ -37,7 +37,7 @@ def _safe_integer(value, name, *, minimum=0):
         raise ValueError(f"{name} must be a safe integer >= {minimum}")
 
 class Client:
-    """In-process library by default; remote() explicitly selects shared-server mode."""
+    """Library mode by default; remote() explicitly selects server mode."""
     def __init__(self, url=None, *, bucket=None, prefix=None, token=None, **config):
         self.url = url.rstrip("/") if url else None
         self.token = token

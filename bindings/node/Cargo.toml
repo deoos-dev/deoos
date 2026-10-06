@@ -2,6 +2,8 @@
 name = "deoos-node"
 version = "0.7.0"
 edition = "2024"
+license = "Apache-2.0"
+description = "Durable execution on object storage."
 [lib]
 crate-type = ["cdylib"]
 [dependencies]

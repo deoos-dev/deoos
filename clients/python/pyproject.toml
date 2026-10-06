@@ -4,7 +4,11 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "deoos"
 version = "0.7.0"
-description = "DEOOS — Durable Execution on Object Storage"
+description = "DEOOS: durable execution on object storage"
 requires-python = ">=3.10"
+license = "Apache-2.0"
+[project.urls]
+Homepage = "https://deoos.dev"
+Repository = "https://github.com/deoos-dev/deoos"
 [tool.setuptools.package-data]
 deoos = ["native/*.dylib", "native/*.so", "native/*.dll"]

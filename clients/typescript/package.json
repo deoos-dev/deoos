@@ -1,6 +1,9 @@
 {
   "name": "deoos",
   "version": "0.7.0",
+  "license": "Apache-2.0",
+  "homepage": "https://deoos.dev",
+  "repository": {"type": "git", "url": "https://github.com/deoos-dev/deoos"},
   "type": "module",
   "exports": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -14,5 +17,5 @@
     "typescript": "^5.9.0",
     "@types/node": "^22.0.0"
   },
-  "description": "DEOOS \u2014 Durable Execution on Object Storage"
+  "description": "DEOOS: durable execution on object storage"
 }

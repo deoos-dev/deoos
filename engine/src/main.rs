@@ -115,7 +115,7 @@ async fn main() {
         }
         Some("--help") | Some("-h") => {
             println!(
-                "deoos-engine: object-storage-backed execution service\n\nConfiguration via environment:\n  DEOOS_STORAGE_PROVIDER: s3 (default), gcs, azure or filesystem\n  DEOOS_STORAGE_DIRECTORY: required for filesystem storage\n    Experimental macOS/APFS backend; qualified on Apple Silicon\n  DEOOS_STORAGE_BUCKET: bucket/container; AWS_BUCKET remains an S3 fallback\n  GOOGLE_* or AZURE_* native credentials for their providers\n  AWS_REGION, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY for S3\n  AWS_SESSION_TOKEN for temporary credentials\n  AWS_ENDPOINT and AWS_ALLOW_HTTP=true for local S3-compatible storage\n  EXECUTION_PREFIX (default durable-v3)\n  ENGINE_BIND (default 127.0.0.1:7331)\n  ENGINE_TOKEN required for non-loopback shared-server access\n  LEASE_MS (default 30000)\n\nUse the Python or TypeScript SDK to submit and execute tasks.\n--check-storage tests conditional writes and read/list consistency in an isolated temporary namespace."
+                "deoos-engine: object-storage-backed execution service\n\nConfiguration via environment:\n  DEOOS_STORAGE_PROVIDER: s3 (default), gcs, azure or filesystem\n  DEOOS_STORAGE_DIRECTORY: required for filesystem storage\n    Experimental macOS/APFS backend; qualified on Apple Silicon\n  DEOOS_STORAGE_BUCKET: bucket/container; AWS_BUCKET remains an S3 fallback\n  GOOGLE_* or AZURE_* native credentials for their providers\n  AWS_REGION, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY for S3\n  AWS_SESSION_TOKEN for temporary credentials\n  AWS_ENDPOINT and AWS_ALLOW_HTTP=true for local S3-compatible storage\n  EXECUTION_PREFIX (default durable-v3)\n  ENGINE_BIND (default 127.0.0.1:7331)\n  ENGINE_TOKEN required for non-loopback server-mode access\n  LEASE_MS (default 30000)\n\nUse the Python or TypeScript SDK to submit and execute tasks.\n--check-storage tests conditional writes and read/list consistency in an isolated temporary namespace."
             );
             return;
         }
@@ -140,7 +140,7 @@ async fn main() {
     if !socket.ip().is_loopback() {
         assert!(
             !std::env::var("ENGINE_TOKEN").unwrap_or_default().is_empty(),
-            "ENGINE_TOKEN required for non-loopback shared server"
+            "ENGINE_TOKEN required for non-loopback server mode"
         );
     }
     let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
