@@ -90,6 +90,106 @@ with Client() as c:
 '''
 
 
+WARM_DISCOVERY = r'''
+import json, os, subprocess, sys, time, uuid
+from deoos import Client, EngineError
+
+# A keeps one native engine for the entire proof. Every B mutation comes from an
+# independent process and engine, using actual SDK operations rather than files.
+EXTERNAL = r"""
+import json, os, sys
+from deoos import Client
+command = json.load(sys.stdin)
+with Client() as c:
+    value = getattr(c, command['method'])(*command.get('args', []), **command.get('kwargs', {}))
+    print(json.dumps({'pid': os.getpid(), 'value': value}))
+"""
+external_pids = []
+def external(method, *args, **kwargs):
+    result = subprocess.run([sys.executable, '-c', EXTERNAL],
+        input=json.dumps({'method': method, 'args': args, 'kwargs': kwargs}),
+        capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stderr
+    reply = json.loads(result.stdout)
+    assert reply['pid'] != os.getpid()
+    external_pids.append(reply['pid'])
+    return reply['value']
+
+with Client() as a:
+    def claim(handler='cache-hints.v1'):
+        return a.request('/claim', {'worker': 'warm-a', 'handlers': [handler]})['task']
+    def inventory():
+        return {task['id']: task for task in a.list_tasks()['tasks']}
+    def complete(task, value):
+        return a.request('/tasks/' + task['id'] + '/complete', {
+            'token': task['token'], 'operation_id': str(uuid.uuid4()), 'value': value})
+
+    # Warm both active/schedule discovery and a task-prefix listing before B
+    # creates any matching entries. Persistent A must observe new external work.
+    assert inventory() == {}
+    for _ in range(3):
+        assert claim() is None
+    external('submit', 'external-task', 'cache-hints.v1', {'source': 'process-b'})
+    queued = inventory()['external-task']
+    assert queued['status'] == 'queued' and queued['inputs'] == {'source': 'process-b'}
+    first = claim()
+    assert first['id'] == 'external-task' and first['inputs'] == queued['inputs']
+    assert inventory()['external-task']['revision'] == first['revision']
+    assert claim() is None, 'A claimed an externally created task twice'
+
+    # B changes the same task-state key, deletes its active marker, then manual
+    # retry creates a new incarnation. No cached owner, revision or tombstone may
+    # hide these changes from A or let an older token commit.
+    cancelled = external('cancel', 'external-task')
+    assert cancelled['status'] == 'cancelled'
+    assert inventory()['external-task']['revision'] == cancelled['revision']
+    assert claim() is None, 'deleted active entry was still claimable'
+    retried = external('retry', 'external-task', cancelled['revision'])
+    assert retried['status'] == 'queued'
+    assert inventory()['external-task']['revision'] == retried['revision']
+    second = claim()
+    assert second['id'] == first['id']
+    assert second['token'] != first['token'] and second['generation'] > first['generation']
+    assert second['active_incarnation'] != first['active_incarnation']
+    assert inventory()['external-task']['revision'] == second['revision']
+    try:
+        complete(first, 'stale owner must not commit')
+    except EngineError as error:
+        assert error.status == 409, error
+    else:
+        raise AssertionError('warm engine accepted stale ownership after external retry')
+    current = external('inspect', 'external-task')
+    assert current['token'] == second['token'] and current['revision'] == second['revision']
+    complete(second, {'fresh': True})
+    terminal = external('inspect', 'external-task')
+    assert terminal['status'] == 'completed' and terminal['output'] == {'fresh': True}
+    assert claim() is None, 'completed marker deletion was not observed'
+
+    # Schedule discovery uses LIST change tokens to skip paused definitions.
+    # This behavioral case catches stale matching-key metadata after replacement.
+    anchor = int(time.time() * 1000) - 1000
+    external('schedule', 'external-schedule', 'cache-schedule.v1', {'source': 'process-b'},
+             3600000, first_due_ms=anchor)
+    external('pause_schedule', 'external-schedule')
+    for _ in range(3):
+        assert claim('cache-schedule.v1') is None
+    external('resume_schedule', 'external-schedule')
+    scheduled = claim('cache-schedule.v1')
+    assert scheduled is not None, 'external resume remained hidden behind paused schedule hints'
+    assert scheduled['schedule'] == {'id': 'external-schedule', 'scheduled_at': anchor}
+    assert scheduled['inputs'] == {'source': 'process-b'}
+    complete(scheduled, {'scheduled': True})
+    assert claim('cache-schedule.v1') is None
+    print(json.dumps({'checks': [
+        'warm persistent engine discovers externally created matching task',
+        'external cancel/retry changes remain visible with fresh revisions and incarnation',
+        'external replacement ownership rejects stale token and preserves current state',
+        'terminal marker deletion removes work from warm discovery',
+        'matching schedule LIST metadata observes external paused-to-resumed replacement'],
+        'external_client_processes': len(external_pids), 'stale_token_status': 409}))
+'''
+
+
 def stop(process):
     if process.poll() is None:
         process.kill()
@@ -165,6 +265,10 @@ def run_local_storage(python, root_env):
         race(python, 'claim', env, work)
         report['checks'].append({'name': 'independent Client processes claim one task',
                                  'winners': 1, 'empty_claims': CONTESTANTS - 1})
+        warm_env = dict(env, EXECUTION_PREFIX='warm-discovery-' + uuid.uuid4().hex)
+        warm = run_script(python, WARM_DISCOVERY, warm_env)
+        report['checks'].append({'name': 'persistent engine observes cross-process discovery and fencing changes',
+                                 **warm})
 
         control = work / 'recovery'
         control.mkdir()

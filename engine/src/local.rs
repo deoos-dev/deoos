@@ -5,11 +5,12 @@
 //! establish a durability barrier, so a prior writer dying after rename cannot
 //! turn an uncertain publication into a successful, but non-durable, read.
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeSet, HashMap},
     fmt,
     fs::{self, File, OpenOptions},
     io::{self, Read, Write},
     path::{Component, Path as FsPath, PathBuf},
+    sync::{Arc, Mutex},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -31,6 +32,8 @@ use uuid::Uuid;
 const STORE: &str = "deoos_local";
 const MAGIC: &[u8; 8] = b"DEOOSL01";
 const MAX_HEADER: usize = 64 * 1024;
+const MAX_KEY_HINTS: usize = 8192;
+const MAX_HINT_KEY_BYTES: usize = 1024;
 
 /// Kept distinct from ordinary storage errors: reconciling by reading after this
 /// error must never allow the failed operation to be reported as successful.
@@ -82,6 +85,9 @@ fn digest(key: &str) -> String {
 #[derive(Debug, Clone)]
 pub(super) struct LocalObjectStore {
     root: PathBuf,
+    // Only immutable hash-to-key mappings, never existence, metadata, or ETags.
+    // Clones share hints; separately opened stores start with an empty cache.
+    key_hints: Arc<Mutex<HashMap<String, Path>>>,
 }
 impl fmt::Display for LocalObjectStore {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -123,6 +129,7 @@ impl LocalObjectStore {
         create_root(root)?;
         let store = Self {
             root: root.to_path_buf(),
+            key_hints: Arc::new(Mutex::new(HashMap::new())),
         };
         check_private_dir(root)?;
         check_filesystem(root)?;
@@ -138,6 +145,27 @@ impl LocalObjectStore {
         }
         full_sync(&bootstrap).map_err(durability)?;
         Ok(store)
+    }
+    fn remember_key(&self, hash: &str, key: &Path) {
+        if key.as_ref().len() > MAX_HINT_KEY_BYTES {
+            return;
+        }
+        // An unavailable or full cache falls back to the original locked read
+        // for unknown keys. Existing immutable hints need no eviction.
+        if let Ok(mut hints) = self.key_hints.lock()
+            && hints.len() < MAX_KEY_HINTS
+            && !hints.contains_key(hash)
+        {
+            hints.insert(hash.to_owned(), key.clone());
+        }
+    }
+    fn known_outside_prefix(&self, hash: &str, prefix: &Path) -> bool {
+        // The mutex is released before the caller can acquire a file lock.
+        self.key_hints.lock().ok().is_some_and(|hints| {
+            hints
+                .get(hash)
+                .is_some_and(|key| !key.prefix_matches(prefix))
+        })
     }
     fn bootstrap(&self) -> Result<File> {
         let file = open_private_file(&self.root.join("bootstrap.lock"), true)?;
@@ -194,6 +222,7 @@ impl LocalObjectStore {
         if parsed.as_ref() != header.key {
             return Err(generic("noncanonical local object key"));
         }
+        self.remember_key(hash, &parsed);
         Ok(Some((header, file)))
     }
     fn put_sync(&self, key: Path, payload: PutPayload, opts: PutOptions) -> Result<PutResult> {
@@ -253,6 +282,7 @@ impl LocalObjectStore {
             full_sync(&file).map_err(durability)?;
             fs::rename(&temporary, self.object_path(&hash)).map_err(generic)?;
             self.barrier(&lock)?;
+            self.remember_key(&hash, &key);
             Ok(PutResult {
                 e_tag: Some(etag),
                 version: None,
@@ -315,6 +345,15 @@ impl LocalObjectStore {
                     .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
             {
                 return Err(generic("unexpected entry in local objects directory"));
+            }
+            // Every filename is still enumerated and checked. Only a validated,
+            // immutable key can rule out a prefix match; matching and unknown
+            // entries retain their fresh locked read and durability barrier.
+            if prefix
+                .as_ref()
+                .is_some_and(|p| self.known_outside_prefix(hash, p))
+            {
+                continue;
             }
             let lock = self.lock(hash)?;
             self.barrier(&lock)?;

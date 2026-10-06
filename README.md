@@ -259,7 +259,7 @@ client.retry("invoice-123", state["revision"], operation_id="operator-retry-123"
 
 TypeScript uses `client.retry(id, state.revision, operationId)`. Retry preserves checkpoints, declared definitions, timers, signals and child IDs, resets attempts to zero and queues immediately. A changed revision conflicts. Resend the same operation ID and original revision after an uncertain response: the most recent retry receipt remains acknowledged even after a worker advances. For CLI resends, supply both the original `--operation-id` and `--revision`; do not let the revision default to a new inspection. Older receipts are not retained indefinitely; never reuse an operation ID for a new action. Preserved compensation/join checkpoints are not rerun, and a parent may require its own retry. Manual retry of a scheduled task overrides automatic overlap policy and does not advance the schedule cursor.
 
-The Python package provides an operator CLI. It uses `ENGINE_URL`/`ENGINE_TOKEN` for a shared server; with no `ENGINE_URL`, it opens the embedded engine using the usual S3 environment:
+The Python package provides an operator CLI. It uses `ENGINE_URL`/`ENGINE_TOKEN` for a shared server; with no `ENGINE_URL`, it opens the engine using the configured embedded storage:
 
 ```sh
 python -m deoos list
