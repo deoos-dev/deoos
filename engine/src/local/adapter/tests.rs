@@ -73,7 +73,7 @@ async fn deletion_survives_process_crashes() {
         let mut child = Command::new(std::env::current_exe().unwrap())
             .args([
                 "--exact",
-                "local::v2::tests::delete_crash_child",
+                "local::adapter::tests::delete_crash_child",
                 "--nocapture",
             ])
             .env(CHILD_ENV, "1")

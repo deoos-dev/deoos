@@ -199,7 +199,7 @@ impl Engine {
                         return Ok(Some((task, version)));
                     }
                     if intent.expected_revision.as_deref() != Some(&task.revision) {
-                        // This proposal lost to another create/retry/adoption. It can never apply.
+                        // This proposal lost to another create/retry. It can never apply.
                         self.retire_active(key).await?;
                         return Ok(None);
                     }
@@ -209,7 +209,7 @@ impl Engine {
                     PutMode::Create
                 }
                 Err((StatusCode::NOT_FOUND, _)) => {
-                    // Retry/adoption cannot resurrect a missing authoritative predecessor.
+                    // Retry cannot resurrect a missing authoritative predecessor.
                     return Err(conflict("active intent predecessor missing"));
                 }
                 Err(error) => return Err(error),
@@ -249,50 +249,56 @@ impl Engine {
         Ok(candidates)
     }
 
+    async fn active_initialized(&self, sentinel: &Key) -> Result<bool, (StatusCode, String)> {
+        match self.store.get(sentinel).await {
+            Ok(result) => {
+                let actual: Value = serde_json::from_slice(&result.bytes().await.map_err(storage)?)
+                    .map_err(|_| conflict("invalid active index sentinel"))?;
+                if actual != json!({"version":ACTIVE_VERSION,"status":"ready"}) {
+                    return Err(conflict("unsupported active index sentinel"));
+                }
+                Ok(true)
+            }
+            Err(object_store::Error::NotFound { .. }) => Ok(false),
+            Err(error) => Err(storage(error)),
+        }
+    }
+
     pub(super) async fn ensure_active(&self) -> Result<(), (StatusCode, String)> {
         let mut ready = self.active_ready.lock().await;
         if *ready {
             return Ok(());
         }
         let sentinel = Key::from(format!("{}/active-index.json", self.prefix));
-        let expected = json!({"version":ACTIVE_VERSION,"status":"ready"});
-        match self.store.get(&sentinel).await {
-            Ok(result) => {
-                let actual: Value = serde_json::from_slice(&result.bytes().await.map_err(storage)?)
-                    .map_err(|_| conflict("invalid active index sentinel"))?;
-                if actual != expected {
-                    return Err(conflict("unsupported active index sentinel"));
-                }
+        if self.active_initialized(&sentinel).await? {
+            *ready = true;
+            return Ok(());
+        }
+        // Fresh prefixes only: existing records without an initialized discovery index
+        // cannot be adopted safely. This check never rewrites task state or creates intents.
+        let prefix = Key::from(format!("{}/tasks", self.prefix));
+        let expected_prefix = format!("{prefix}/");
+        let occupied = self
+            .store
+            .list(Some(&prefix))
+            .try_collect::<Vec<_>>()
+            .await
+            .map_err(storage)?
+            .iter()
+            .any(|object| object.location.as_ref().starts_with(&expected_prefix));
+        if occupied {
+            // A concurrent current engine may have initialized and submitted work between
+            // our first sentinel read and LIST. It always commits the sentinel first.
+            if self.active_initialized(&sentinel).await? {
                 *ready = true;
                 return Ok(());
             }
-            Err(object_store::Error::NotFound { .. }) => {}
-            Err(error) => return Err(storage(error)),
+            return Err(conflict(
+                "execution prefix has task records without an active index; use a fresh prefix",
+            ));
         }
-        // All old writers must be stopped before upgrade. Concurrent new writers publish
-        // intents first, so a complete scan is sufficient; it is never repeated after ready.
-        let prefix = Key::from(format!("{}/tasks", self.prefix));
-        let expected_prefix = format!("{prefix}/");
-        let objects: Vec<_> = self
-            .store
-            .list(Some(&prefix))
-            .try_collect()
-            .await
-            .map_err(storage)?;
-        for object in objects {
-            let path = object.location.to_string();
-            let Some(relative) = path.strip_prefix(&expected_prefix) else {
-                continue;
-            };
-            let Some(id) = relative.strip_suffix("/state.json") else {
-                continue;
-            };
-            if !valid(id) {
-                return Err(conflict("invalid stored task key"));
-            }
-            self.backfill_active(id).await?;
-        }
-        let bytes = serde_json::to_vec(&expected).unwrap();
+        let bytes =
+            serde_json::to_vec(&json!({"version":ACTIVE_VERSION,"status":"ready"})).unwrap();
         match self
             .store
             .put_opts(
@@ -307,55 +313,16 @@ impl Engine {
         {
             Ok(_) => {}
             Err(error) => {
-                // Another initializer or a lost response may have completed this scan.
+                // Another initializer or a lost response may have committed the sentinel.
                 if local::is_durability_error(&error) {
                     return Err(storage(error));
                 }
-                let result = self
-                    .store
-                    .get(&sentinel)
-                    .await
-                    .map_err(|_| storage(error))?;
-                let actual: Value = serde_json::from_slice(&result.bytes().await.map_err(storage)?)
-                    .map_err(|_| conflict("invalid active index sentinel"))?;
-                if actual != expected {
-                    return Err(conflict("unsupported active index sentinel"));
+                if !self.active_initialized(&sentinel).await? {
+                    return Err(storage(error));
                 }
             }
         }
         *ready = true;
         Ok(())
-    }
-
-    async fn backfill_active(&self, id: &str) -> Result<(), (StatusCode, String)> {
-        for _ in 0..16 {
-            let (mut task, _) = self.read(id).await?;
-            if task.terminal() {
-                return Ok(());
-            }
-            if task.active_incarnation.is_some() {
-                // Existing indexed states must have their own durable marker. Missing markers
-                // are repaired by a fresh CAS incarnation, never by recreating a retired key.
-                let key = self.active_key(&task)?;
-                match self.store.head(&key).await {
-                    Ok(_) => {
-                        if let Some((actual, _)) = self.resolve_active(&key).await?
-                            && actual.active_incarnation == task.active_incarnation
-                        {
-                            return Ok(());
-                        }
-                    }
-                    Err(object_store::Error::NotFound { .. }) => {}
-                    Err(error) => return Err(storage(error)),
-                }
-            }
-            let expected_revision = task.revision.clone();
-            task.revision = Uuid::new_v4().to_string();
-            task.active_incarnation = Some(Uuid::new_v4().to_string());
-            self.publish_active(&task, Some(expected_revision)).await?;
-            self.resolve_active(&self.active_key(&task)?).await?;
-            // A concurrent initializer may have won. Check latest state before declaring ready.
-        }
-        Err(conflict("active migration contention; retry"))
     }
 }

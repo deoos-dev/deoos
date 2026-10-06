@@ -2,11 +2,9 @@
 //!
 //! Lock files are permanent: removing one can split locking between processes.
 //! Immutable per-key versions retain the last acknowledged file until a new
-//! version has passed its post-publication full flush. This V2 prototype accepts
-//! fresh roots only; `objects` is a regular-file tripwire that makes older
-//! adapters fail during initialization. The V2 marker/layout is selected under
-//! the permanent bootstrap lock. Root, objects-v2, locks and bootstrap share
-//! one local APFS filesystem.
+//! version has passed its post-publication full flush. Initialization and format
+//! validation run under the permanent bootstrap lock. Root, objects, locks and
+//! bootstrap share one local APFS filesystem. There is no legacy format support.
 //! Mounting over or replacing store paths while clients are open is unsupported.
 //! Concurrent calls on clones may share a full flush only after each caller's
 //! own fsync. Both pre-rename and post-publication durability waits remain.
@@ -40,7 +38,6 @@ use uuid::Uuid;
 const STORE: &str = "deoos_local";
 const MAGIC: &[u8; 8] = b"DEOOSV02";
 const FORMAT_MARKER: &[u8] = b"DEOOS-LOCAL-FORMAT-2\n";
-const OBJECTS_TRIPWIRE: &[u8] = b"DEOOS-LOCAL-V2-TRIPWIRE\n";
 const MAX_HEADER: usize = 64 * 1024;
 const CHECKSUM_LEN: u64 = 32;
 const MAX_KEY_HINTS: usize = 8192;
@@ -170,7 +167,7 @@ impl LocalObjectStore {
         };
         check_private_dir(root)?;
         check_filesystem(root)?;
-        store.initialize_v2()?;
+        store.initialize()?;
         check_same_filesystem(root, &bootstrap)?;
         sync_dir(&store.objects_root()).map_err(durability)?;
         sync_dir(&store.root.join("locks")).map_err(durability)?;
@@ -205,24 +202,38 @@ impl LocalObjectStore {
         check_file_device(root, &file)
     }
     fn objects_root(&self) -> PathBuf {
-        self.root.join("objects-v2")
+        self.root.join("objects")
     }
-    fn initialize_v2(&self) -> Result<()> {
-        let marker = self.root.join("format-v2");
-        let tripwire = self.root.join("objects");
+    fn initialize(&self) -> Result<()> {
+        let marker = self.root.join("format");
+        // Reject foreign entries before admitting data. Recover only interrupted
+        // initialization of this format, never guess or migrate existing data.
+        for entry in fs::read_dir(&self.root).map_err(generic)? {
+            let name = entry.map_err(generic)?.file_name();
+            let name = name
+                .to_str()
+                .ok_or_else(|| generic("non-UTF8 entry in local storage root"))?;
+            if name
+                .strip_prefix(".format-")
+                .and_then(|suffix| Uuid::parse_str(suffix).ok().map(|id| (suffix, id)))
+                .is_some_and(|(suffix, id)| id.to_string() == suffix)
+            {
+                Self::validate_marker_temp(&self.root, name)?;
+            } else if !matches!(name, "bootstrap.lock" | "objects" | "locks" | "format") {
+                return Err(generic(
+                    "unexpected entry in local storage root; use a fresh directory",
+                ));
+            }
+        }
         match fs::symlink_metadata(&marker) {
             Ok(_) => {
                 let mut file = open_private_file(&marker, false)?;
                 let mut bytes = Vec::new();
                 file.read_to_end(&mut bytes).map_err(generic)?;
                 if bytes != FORMAT_MARKER {
-                    return Err(generic("unsupported local store format marker"));
-                }
-                let mut file = open_private_file(&tripwire, false)?;
-                let mut bytes = Vec::new();
-                file.read_to_end(&mut bytes).map_err(generic)?;
-                if bytes != OBJECTS_TRIPWIRE {
-                    return Err(generic("invalid local V2 compatibility tripwire"));
+                    return Err(generic(
+                        "unsupported local store format; use a fresh directory",
+                    ));
                 }
                 check_private_dir(&self.objects_root())?;
                 check_private_dir(&self.root.join("locks"))?;
@@ -231,47 +242,17 @@ impl LocalObjectStore {
             Err(error) if error.kind() == io::ErrorKind::NotFound => {}
             Err(error) => return Err(generic(error)),
         }
-
-        match fs::symlink_metadata(&tripwire) {
-            Ok(meta) if meta.is_dir() => {
-                return Err(generic(
-                    "legacy local store root is incompatible with V2; migration is not supported",
-                ));
-            }
-            Ok(_) => {
-                let mut file = open_private_file(&tripwire, false)?;
-                let mut bytes = Vec::new();
-                file.read_to_end(&mut bytes).map_err(generic)?;
-                if bytes != OBJECTS_TRIPWIRE {
-                    return Err(generic("incomplete or incompatible local V2 root"));
-                }
-                // A marker-less initialized root is safe to complete only while
-                // no object-version data has ever been admitted.
-                ensure_empty_or_missing(&self.objects_root(), "incomplete nonempty local V2 root")?;
-                ensure_empty_or_missing(
-                    &self.root.join("locks"),
-                    "incomplete nonempty local V2 locks",
-                )?;
-            }
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                ensure_empty_or_missing(
-                    &self.objects_root(),
-                    "incompatible nonempty local V2 root",
-                )?;
-                ensure_empty_or_missing(
-                    &self.root.join("locks"),
-                    "incompatible nonempty local V2 locks",
-                )?;
-                let mut file = create_new_private_file(&tripwire)?;
-                file.write_all(OBJECTS_TRIPWIRE).map_err(generic)?;
-                ordinary_sync(&file).map_err(durability)?;
-                full_sync(&file).map_err(durability)?;
-            }
-            Err(error) => return Err(generic(error)),
-        }
+        ensure_empty_or_missing(
+            &self.objects_root(),
+            "unrecognized nonempty local storage; use a fresh directory",
+        )?;
+        ensure_empty_or_missing(
+            &self.root.join("locks"),
+            "unrecognized nonempty local locks; use a fresh directory",
+        )?;
         create_private_dir(&self.objects_root())?;
         create_private_dir(&self.root.join("locks"))?;
-        let temporary = self.root.join(format!(".format-v2-{}", Uuid::new_v4()));
+        let temporary = self.root.join(format!(".format-{}", Uuid::new_v4()));
         let result = (|| {
             let mut file = create_new_private_file(&temporary)?;
             file.write_all(FORMAT_MARKER).map_err(generic)?;
@@ -441,25 +422,25 @@ impl LocalObjectStore {
             .len();
         let mut prefix = [0u8; 12];
         if name.expected_len < (12 + 1 + CHECKSUM_LEN) || total > name.expected_len {
-            return Err(invalid("invalid local V2 filename length"));
+            return Err(invalid("invalid local object filename length"));
         }
         if total < name.expected_len {
             return Err(VersionReadError::Incomplete);
         }
         if total < prefix.len() as u64 {
-            return Err(invalid("invalid local V2 envelope length"));
+            return Err(invalid("invalid local object envelope length"));
         }
         file.read_exact(&mut prefix)
             .map_err(|error| VersionReadError::Invalid(generic(error)))?;
         if &prefix[..8] != MAGIC {
-            return Err(invalid("invalid local V2 envelope magic"));
+            return Err(invalid("invalid local object envelope magic"));
         }
         let header_len = u32::from_le_bytes(prefix[8..].try_into().unwrap()) as usize;
         if header_len == 0 || header_len > MAX_HEADER {
-            return Err(invalid("invalid local V2 header length"));
+            return Err(invalid("invalid local object header length"));
         }
         if total < 12 + header_len as u64 {
-            return Err(invalid("local V2 header exceeds named record length"));
+            return Err(invalid("local object header exceeds named record length"));
         }
         let mut bytes = vec![0u8; header_len];
         file.read_exact(&mut bytes)
@@ -470,7 +451,7 @@ impl LocalObjectStore {
         let expected_total = body_offset
             .checked_add(header.size)
             .and_then(|n| n.checked_add(CHECKSUM_LEN))
-            .ok_or_else(|| invalid("local V2 record size overflow"))?;
+            .ok_or_else(|| invalid("local object record size overflow"))?;
         if name.expected_len != expected_total
             || total != expected_total
             || header.format != 2
@@ -481,7 +462,7 @@ impl LocalObjectStore {
             || digest(&header.key) != hash
             || (header.kind == VersionKind::Tombstone && header.size != 0)
         {
-            return Err(invalid("invalid local V2 version metadata"));
+            return Err(invalid("invalid local object version metadata"));
         }
         let parsed =
             Path::parse(&header.key).map_err(|error| VersionReadError::Invalid(generic(error)))?;
@@ -504,7 +485,7 @@ impl LocalObjectStore {
         file.read_exact(&mut stored)
             .map_err(|error| VersionReadError::Invalid(generic(error)))?;
         if checksum.finalize().as_slice() != stored {
-            return Err(invalid("local V2 checksum mismatch"));
+            return Err(invalid("local object checksum mismatch"));
         }
         file.seek(SeekFrom::Start(body_offset))
             .map_err(|error| VersionReadError::Invalid(generic(error)))?;
@@ -1183,24 +1164,24 @@ fn check_same_filesystem(root: &FsPath, bootstrap: &File) -> Result<()> {
     let check = |file: &File| -> Result<()> {
         if file.metadata().map_err(generic)?.dev() != device {
             return Err(unsupported(
-                "local store root, objects-v2, locks, and bootstrap must be on the same APFS filesystem; nested mounts are unsupported",
+                "local store root, objects, locks, and bootstrap must be on the same APFS filesystem; nested mounts are unsupported",
             ));
         }
         Ok(())
     };
     check(bootstrap)?;
-    for name in ["objects-v2", "locks"] {
+    for name in ["objects", "locks"] {
         let file = secure_options()
             .read(true)
             .open(root.join(name))
             .map_err(generic)?;
         check(&file)?;
     }
-    let tripwire = secure_options()
+    let marker = secure_options()
         .read(true)
-        .open(root.join("objects"))
+        .open(root.join("format"))
         .map_err(generic)?;
-    check(&tripwire)?;
+    check(&marker)?;
     Ok(())
 }
 #[cfg(not(target_os = "macos"))]

@@ -50,7 +50,7 @@ def main():
     report = {"started": datetime.datetime.now(datetime.timezone.utc).isoformat(), "backend": "local-rustfs-only",
               "bucket": bucket, "owned_prefix": prefix, "checks": [], "history_samples": [], "cleaned": False,
               "cleanup_errors": [],
-              "cold_process_definition": "new engine instance against preexisting ready index; legacy bootstrap tested separately",
+              "cold_process_definition": "new engine instance against preexisting ready index; fresh initialization and incompatible prefixes tested separately",
               "runtime_hashes": {"engine": digest(engine), "python_native": digest(native)},
               "source_hashes": {name: digest(repo / name) for name in
                                 ("engine/src/lib.rs", "engine/src/active.rs", "engine/src/discovery.rs", "engine/src/schedules.rs",
@@ -280,97 +280,56 @@ def main():
             assert client.inspect(failed["id"])["status"] == "completed"
             report["checks"].append({"mode": mode, "name": "cleanup racing explicit retry deletes old incarnation only"})
 
-            # A legacy prefix is scanned once, then the ready sentinel prevents historical discovery.
-            legacy_prefix = f"{prefix}/{mode}/legacy-bootstrap"
-            legacy = proposed(template, "legacy-queued")
-            legacy.pop("active_incarnation", None)
-            put(state_key(legacy_prefix, legacy), legacy)
-            terminal = proposed(template, "legacy-completed")
-            terminal.update(status="completed", output="retained legacy output")
-            terminal.pop("active_incarnation", None)
-            put(state_key(legacy_prefix, terminal), terminal)
-            terminal_etag = names(legacy_prefix + "/tasks/")[state_key(legacy_prefix, terminal)]
-            migrated = open_client(mode, legacy_prefix)
-            first = claim(migrated)
-            assert first and first["id"] == "legacy-queued" and first.get("active_incarnation")
-            finish(migrated, first)
-            proxy.drain()
-            proxy.reset()
-            assert claim(migrated) is None
-            proxy.drain()
-            no_historical_enumeration(proxy.snapshot())
-            assert names(legacy_prefix + "/tasks/")[state_key(legacy_prefix, terminal)] == terminal_etag
-            report["checks"].append({"mode": mode, "name": "one-time legacy bootstrap retains terminal bytes and creates active incarnation"})
+            # Missing-index task records are rejected unchanged, including terminal or malformed records.
+            for fixture in ("queued", "completed", "malformed", "current-without-index"):
+                incompatible_prefix = f"{prefix}/{mode}/incompatible-{fixture}"
+                stored = proposed(template, "retained")
+                if fixture != "current-without-index":
+                    stored.pop("active_incarnation", None)
+                if fixture == "completed":
+                    stored.update(status="completed", output="retained output")
+                key = state_key(incompatible_prefix, stored)
+                if fixture == "malformed":
+                    s3.put_object(Bucket=bucket, Key=key, Body=b'{"invalid":')
+                else:
+                    put(key, stored)
+                before = names(incompatible_prefix + "/")
+                rejected = open_client(mode, incompatible_prefix)
+                for operation in (lambda: claim(rejected),
+                                  lambda: rejected.submit("new-task", "contract.active", {})):
+                    proxy.drain()
+                    proxy.reset()
+                    try:
+                        operation()
+                    except EngineError as error:
+                        assert error.status == 409, error
+                        assert "fresh prefix" in str(error), error
+                    else:
+                        raise AssertionError("missing-index task records did not block initialization")
+                    proxy.drain()
+                    operations = proxy.snapshot()["requests"]
+                    assert operations.get("PUT", 0) == 0 and operations.get("DELETE", 0) == 0, operations
+                    assert names(incompatible_prefix + "/") == before
+                report["checks"].append({"mode": mode, "name": f"{fixture} records without index reject claim and submit without mutations"})
 
-            # A partly successful migration cannot declare the prefix ready after a bad record.
-            broken_prefix = f"{prefix}/{mode}/legacy-interrupted-bootstrap"
-            first = proposed(template, "a-first-queued")
-            first.pop("active_incarnation", None)
-            put(state_key(broken_prefix, first), first)
-            bad_key = broken_prefix + "/tasks/z-malformed/state.json"
-            s3.put_object(Bucket=bucket, Key=bad_key, Body=b'{"invalid":')
-            broken = open_client(mode, broken_prefix)
-            try:
-                claim(broken)
-            except EngineError as error:
-                assert error.status == 500, error
-            else:
-                raise AssertionError("malformed migration record did not fail initialization")
-            assert not names(broken_prefix + "/active-index.json")
-            partly_migrated = broken.inspect(first["id"])
-            assert partly_migrated["status"] == "queued" and partly_migrated.get("active_incarnation")
-            fixed = proposed(template, "z-malformed")
-            fixed.update(status="completed", output="repaired owned fixture")
-            fixed.pop("active_incarnation", None)
-            put(bad_key, fixed)
-            fresh = [open_client(mode, broken_prefix), open_client(mode, broken_prefix)]
+            # Independent current engines race to initialize a fresh prefix and submit separate work.
+            fresh_prefix = f"{prefix}/{mode}/concurrent-fresh"
+            fresh = [open_client(mode, fresh_prefix), open_client(mode, fresh_prefix)]
+            def submit_fresh(index):
+                return fresh[index].submit(f"fresh-{index}", "contract.active", {})
+            with ThreadPoolExecutor(max_workers=2) as workers:
+                submitted = list(workers.map(submit_fresh, range(2)))
+            assert {task["id"] for task in submitted} == {"fresh-0", "fresh-1"}
+            assert names(fresh_prefix + "/active-index.json")
             with ThreadPoolExecutor(max_workers=2) as workers:
                 results = list(workers.map(claim, fresh))
-            winners = [task for task in results if task is not None]
-            assert len(winners) == 1 and winners[0]["id"] == first["id"], results
-            assert winners[0]["active_incarnation"] == partly_migrated["active_incarnation"]
-            finish(fresh[0], winners[0])
-            assert names(broken_prefix + "/active-index.json")
-            report["checks"].append({"mode": mode, "name": "malformed legacy record blocks ready sentinel; repaired bootstrap has one concurrent claim winner"})
-
-            # Adoption changes discovery identity only, retaining a live lease and waiting checkpoint.
-            source = open_client(mode, f"{prefix}/{mode}/migration-source")
-            source.submit("leased", "contract.active", {})
-            leased = claim(source)
-            source.request("/tasks/leased/definitions/saved", {"token": leased["token"],
-                "operation_id": str(uuid.uuid4()), "value": {"kind": "step", "revision": "1"}})
-            source.request("/tasks/leased/steps/saved", {"token": leased["token"],
-                "operation_id": str(uuid.uuid4()), "value": {"checkpoint": "preserved"}})
-            leased = source.inspect("leased")
-            source.submit("waiting", "contract.active", {})
-            waiting = claim(source)
-            assert waiting and waiting["id"] == "waiting"
-            source.request("/tasks/waiting/definitions/saved", {"token": waiting["token"],
-                "operation_id": str(uuid.uuid4()), "value": {"kind": "step", "revision": "1"}})
-            source.request("/tasks/waiting/steps/saved", {"token": waiting["token"],
-                "operation_id": str(uuid.uuid4()), "value": {"checkpoint": "waiting preserved"}})
-            waiting = source.request("/tasks/waiting/suspend", {"token": waiting["token"],
-                "operation_id": str(uuid.uuid4()), "value": {"signal": "go"}})
-            states_prefix = f"{prefix}/{mode}/legacy-states"
-            for task in (leased, waiting):
-                old = copy.deepcopy(task)
-                old.pop("active_incarnation", None)
-                put(state_key(states_prefix, old), old)
-            states = open_client(mode, states_prefix)
-            assert leased["expires_at"] > int(time.time() * 1000), "lease fixture expired before migration"
-            assert claim(states) is None, "migration claimed live lease or unready waiter"
-            preserved = ("status", "owner", "token", "generation", "attempts", "steps", "definitions",
-                         "expires_at", "available_at", "waiting_on", "timers", "signals", "history")
-            for before in (leased, waiting):
-                after = states.inspect(before["id"])
-                assert after.get("active_incarnation")
-                assert all(after[field] == before[field] for field in preserved), (before, after)
-                assert states.request(f"/tasks/{before['id']}/steps/saved") == source.request(f"/tasks/{before['id']}/steps/saved")
-            finish(states, states.inspect("leased"))
-            source.cancel("leased")
-            source.cancel("waiting")
-            states.cancel("waiting")
-            report["checks"].append({"mode": mode, "name": "legacy leased-running and signal-waiting adoption preserves ownership, generation, checkpoints and deadline without early claim"})
+            assert {task["id"] for task in results if task is not None} == {"fresh-0", "fresh-1"}, results
+            for task in results:
+                finish(fresh[0], task)
+            restarted = open_client(mode, fresh_prefix)
+            assert claim(restarted) is None
+            assert all(restarted.inspect(f"fresh-{index}")["status"] == "completed" for index in range(2))
+            report["checks"].append({"mode": mode, "name": "concurrent fresh initialization submits and claims both tasks; restart preserves completion"})
 
             # Exercise Path canonicalization through real APIs; manual fixtures use simple keys.
             special = open_client(mode, f"{prefix}/{mode}/spaces % /special")

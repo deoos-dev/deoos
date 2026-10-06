@@ -1,6 +1,6 @@
 /* macOS-only test interposer. Never linked into the engine or shipped SDK.
  * Arm by creating DEOOS_FAULT_ARM after server startup. Rename modes consume it
- * for one exact destination (or explicit owned directory prefix); fail-read-sync consumes it for one objects-directory
+ * for one owned object-directory prefix; fail-read-sync consumes it for one objects-directory
  * barrier in an otherwise idle reader. Startup barriers are untouched.
  */
 #include <errno.h>
@@ -15,15 +15,12 @@
 
 static const char *target, *arm, *marker, *mode;
 static _Thread_local int fail_next_directory_sync;
-static int target_prefix;
 
 __attribute__((constructor)) static void configure(void) {
     target = getenv("DEOOS_FAULT_TARGET");
     arm = getenv("DEOOS_FAULT_ARM");
     marker = getenv("DEOOS_FAULT_MARKER");
     mode = getenv("DEOOS_FAULT_MODE");
-    const char *prefix = getenv("DEOOS_FAULT_TARGET_PREFIX");
-    target_prefix = prefix && strcmp(prefix, "1") == 0;
 }
 
 static void mark(const char *event) {
@@ -34,7 +31,7 @@ static void mark(const char *event) {
 }
 
 static int injected_rename(const char *from, const char *to) {
-    int matched = target && arm && marker && mode && (target_prefix ? strncmp(to, target, strlen(target)) == 0 : strcmp(to, target) == 0)
+    int matched = target && arm && marker && mode && strncmp(to, target, strlen(target)) == 0
         && unlink(arm) == 0;
     if (matched && strcmp(mode, "before-rename") == 0) {
         mark("before-rename");

@@ -32,31 +32,16 @@ import uuid
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 
 
-def seed_storage(storage, layout):
-    assert layout in ('v1', 'v2')
-    if layout == 'v1':
-        storage.mkdir(mode=0o700)
-        for name in ('objects', 'locks'):
-            (storage / name).mkdir(mode=0o700)
-    # A fresh V2 root is initialized by the real compatibility engine.
-
-
-def fault_target(storage, key, layout):
-    assert layout in ('v1', 'v2')
-    target = storage / ('objects' if layout == 'v1' else 'objects-v2') / hashlib.sha256(key.encode()).hexdigest()
+def fault_target(storage, key):
+    target = storage / 'objects' / hashlib.sha256(key.encode()).hexdigest()
     # The trailing slash prevents matching any neighboring hash directory.
-    return {'DEOOS_FAULT_TARGET': str(target) + ('/' if layout == 'v2' else ''),
-            'DEOOS_FAULT_TARGET_PREFIX': '1' if layout == 'v2' else '0'}
+    return {'DEOOS_FAULT_TARGET': str(target) + '/'}
 
 
-def assert_layout(storage, layout):
+def assert_layout(storage):
     assert (storage / 'locks').is_dir()
-    if layout == 'v1':
-        assert (storage / 'objects').is_dir()
-        assert not (storage / 'objects-v2').exists() and not (storage / 'format-v2').exists()
-    else:
-        assert (storage / 'objects').is_file()
-        assert (storage / 'objects-v2').is_dir() and (storage / 'format-v2').is_file()
+    assert (storage / 'objects').is_dir() and (storage / 'format').is_file()
+    assert not (storage / 'objects-v2').exists() and not (storage / 'format-v2').exists()
 
 
 def request(url, route, body=None, timeout=15):
@@ -124,13 +109,12 @@ def wait_marker(marker, server):
     return marker.read_text()
 
 
-def case(binary, library, work, mode, inherited, new_create=False, layout="v1"):
+def case(binary, library, work, mode, inherited, new_create=False):
     work.mkdir()
     storage = work / 'storage'
     prefix = 'fault-' + uuid.uuid4().hex
     key = f'{prefix}/tasks/recovery/state.json'
-    seed_storage(storage, layout)
-    target_options = fault_target(storage, key, layout)
+    target_options = fault_target(storage, key)
     arm, marker = work / 'arm', work / 'marker'
     env = {key: value for key, value in inherited.items()
            if not key.startswith(('AWS_', 'DEOOS_STORAGE_', 'DEOOS_FAULT_', 'DYLD_'))
@@ -143,11 +127,11 @@ def case(binary, library, work, mode, inherited, new_create=False, layout="v1"):
                      DEOOS_FAULT_MARKER=str(marker), DEOOS_FAULT_MODE=mode)
     server = Server(binary, fault_env, work / 'fault-server.log')
     claim = {'worker': 'interrupted-owner', 'handlers': ['recovery.v1']}
-    result = {'mode': 'new-create-' + mode if new_create else mode, 'layout': layout}
+    result = {'mode': 'new-create-' + mode if new_create else mode}
     submission = {'id': 'recovery', 'handler': 'recovery.v1',
                   'inputs': {'sentinel': [1, 2, 3]}, 'max_attempts': 3}
     try:
-        assert_layout(storage, layout)
+        assert_layout(storage)
         if new_create:
             assert request(server.url, '/tasks/recovery')[0] == 404
             before = None
@@ -251,14 +235,13 @@ def case(binary, library, work, mode, inherited, new_create=False, layout="v1"):
     return result
 
 
-def warm_reader_case(binary, library, work, inherited, layout="v1"):
+def warm_reader_case(binary, library, work, inherited):
     """A warmed reader must certify a different ETag after another writer dies."""
     work.mkdir()
     storage = work / 'storage'
     prefix = 'warm-fault-' + uuid.uuid4().hex
     key = f'{prefix}/tasks/recovery/state.json'
-    seed_storage(storage, layout)
-    target_options = fault_target(storage, key, layout)
+    target_options = fault_target(storage, key)
     reader_arm, reader_marker = work / 'reader-arm', work / 'reader-marker'
     writer_arm, writer_marker = work / 'writer-arm', work / 'writer-marker'
     env = {key: value for key, value in inherited.items()
@@ -275,9 +258,9 @@ def warm_reader_case(binary, library, work, inherited, layout="v1"):
                       DEOOS_FAULT_MARKER=str(writer_marker), DEOOS_FAULT_MODE='after-rename')
     reader = Server(binary, reader_env, work / 'warm-reader.log')
     writer = None
-    result = {'mode': 'warm-reader-new-version', 'same_reader_process': True, 'layout': layout}
+    result = {'mode': 'warm-reader-new-version', 'same_reader_process': True}
     try:
-        assert_layout(storage, layout)
+        assert_layout(storage)
         before = successful(reader.url, '/tasks', {
             'id': 'recovery', 'handler': 'recovery.v1',
             'inputs': {'sentinel': [1, 2, 3]}, 'max_attempts': 3})
@@ -350,6 +333,129 @@ def warm_reader_case(binary, library, work, inherited, layout="v1"):
     return result
 
 
+def initialization_cases(binary, library, work, inherited):
+    """Initialize only the current layout; reject unfamiliar data without migration."""
+    work.mkdir()
+    checks = []
+    clean_env = {key: value for key, value in inherited.items()
+                 if not key.startswith(('AWS_', 'DEOOS_STORAGE_', 'DEOOS_FAULT_', 'DYLD_'))
+                 and key not in {'ENGINE_URL', 'ENGINE_TOKEN', 'ENGINE_BIND', 'DEOOS_MODE'}}
+
+    def probe(root, options=None):
+        env = dict(clean_env, DEOOS_STORAGE_PROVIDER='filesystem',
+                   DEOOS_STORAGE_DIRECTORY=str(root), EXECUTION_PREFIX='init-proof')
+        env.update(options or {})
+        return subprocess.run([str(binary), '--check-storage'], env=env,
+                              capture_output=True, text=True, timeout=30)
+
+    def snapshot(root):
+        return {str(path.relative_to(root)): None if path.is_dir() else path.read_bytes().hex()
+                for path in root.rglob('*') if path.name != 'bootstrap.lock'}
+
+    def private_file(path, value):
+        path.write_bytes(value)
+        path.chmod(0o600)
+
+    def initialize_only(root, log_name):
+        env = dict(clean_env, DEOOS_STORAGE_PROVIDER='filesystem',
+                   DEOOS_STORAGE_DIRECTORY=str(root), EXECUTION_PREFIX='init-proof')
+        server = Server(binary, env, work / log_name)
+        server.close()
+
+    fresh = work / 'fresh'
+    initialize_only(fresh, 'fresh.log')
+    assert_layout(fresh)
+    assert {path.name for path in fresh.iterdir()} == {'format', 'bootstrap.lock', 'objects', 'locks'}
+    before = snapshot(fresh)
+    initialize_only(fresh, 'reopen.log')
+    assert snapshot(fresh) == before
+    checks.append({'mode': 'current-initialization', 'fresh_and_reopen': True, 'exact_four_entries': True})
+
+    for scaffold in ('bootstrap-only', 'objects-only', 'objects-and-locks', 'marker-temp'):
+        partial = work / scaffold
+        partial.mkdir(mode=0o700)
+        private_file(partial / 'bootstrap.lock', b'')
+        if scaffold != 'bootstrap-only':
+            (partial / 'objects').mkdir(mode=0o700)
+        if scaffold in ('objects-and-locks', 'marker-temp'):
+            (partial / 'locks').mkdir(mode=0o700)
+        if scaffold == 'marker-temp':
+            private_file(partial / ('.format-' + str(uuid.uuid4())), b'partial')
+        initialize_only(partial, scaffold + '.log')
+        assert_layout(partial)
+        checks.append({'mode': 'interrupted-' + scaffold, 'recovered': True})
+
+    for kind in ('unsupported-marker', 'nonempty-objects', 'nonempty-locks', 'previous-layout', 'symlink-format', 'symlink-objects'):
+        root = work / kind
+        root.mkdir(mode=0o700)
+        if kind == 'previous-layout':
+            private_file(root / 'objects', b'old-layout-guard\n')
+            private_file(root / 'format-v2', b'DEOOS-LOCAL-FORMAT-2\n')
+            (root / 'objects-v2').mkdir(mode=0o700)
+            private_file(root / 'objects-v2' / 'sentinel', b'preserve-old-data')
+        else:
+            for name in ('objects', 'locks'):
+                (root / name).mkdir(mode=0o700)
+            if kind.startswith('symlink-'):
+                name = kind.removeprefix('symlink-')
+                external = work / (kind + '-external')
+                if name == 'objects':
+                    (root / name).rmdir()
+                    external.mkdir(mode=0o700)
+                else:
+                    private_file(external, b'DEOOS-LOCAL-FORMAT-2\n')
+                (root / name).symlink_to(external)
+            elif kind == 'unsupported-marker':
+                private_file(root / 'format', b'UNSUPPORTED\n')
+            else:
+                private_file(root / kind.removeprefix('nonempty-') / 'sentinel', b'preserve-data')
+        before = snapshot(root)
+        response = probe(root)
+        assert response.returncode == 1, (kind, response)
+        if not kind.startswith('symlink-'):
+            assert 'use a fresh directory' in response.stderr, (kind, response.stderr)
+        assert snapshot(root) == before, kind
+        checks.append({'mode': kind, 'rejected': True, 'data_unchanged': True})
+
+    # Kill or fail the actual format-marker publication, then reopen the same
+    # root with a fresh unfaulted process. No task writes or background worker.
+    for mode in ('before-rename', 'after-rename', 'fail-sync'):
+        root = work / ('init-' + mode)
+        root.mkdir(mode=0o700)
+        arm, marker = work / (mode + '-arm'), work / (mode + '-marker')
+        arm.write_text('armed')
+        env = dict(clean_env, DEOOS_STORAGE_PROVIDER='filesystem',
+                   DEOOS_STORAGE_DIRECTORY=str(root), EXECUTION_PREFIX='init-proof',
+                   DYLD_INSERT_LIBRARIES=str(library), DEOOS_FAULT_TARGET=str(root) + '/',
+                   DEOOS_FAULT_ARM=str(arm), DEOOS_FAULT_MARKER=str(marker),
+                   DEOOS_FAULT_MODE=mode)
+        process = subprocess.Popen([str(binary), '--check-storage'], env=env,
+                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        try:
+            if mode == 'fail-sync':
+                stdout, stderr = process.communicate(timeout=30)
+                assert process.returncode == 1 and b'durability' in stderr, (stdout, stderr)
+                assert marker.read_text() == 'after-rename-directory-fsync-EIO'
+            else:
+                deadline = time.monotonic() + 20
+                while not marker.exists():
+                    assert process.poll() is None, process.communicate()
+                    assert time.monotonic() < deadline, 'initialization fault boundary not reached'
+                    time.sleep(.01)
+                assert marker.read_text() == mode
+                process.kill()
+                process.communicate(timeout=10)
+                assert process.returncode == -signal.SIGKILL
+            assert probe(root).returncode == 0
+            assert_layout(root)
+            checks.append({'mode': 'initialization-' + mode, 'recovered': True})
+        finally:
+            if process.poll() is None:
+                process.kill()
+            process.communicate(timeout=10)
+    return checks
+
+
 def run_faults(binary, inherited=None):
     assert platform.system() == 'Darwin' and platform.machine() == 'arm64', \
         'fault qualification requires macOS ARM64'
@@ -362,15 +468,13 @@ def run_faults(binary, inherited=None):
         library = work / 'local_faults.dylib'
         subprocess.run(['clang', '-dynamiclib', '-Wall', '-Wextra', '-Werror',
                         '-o', str(library), str(ROOT / 'tests/local_faults.c')], check=True)
-        for layout in ('v1', 'v2'):
-            format_work = work / layout
-            format_work.mkdir()
-            for mode in ('before-rename', 'after-rename', 'fail-sync'):
-                report['checks'].append(case(binary, library, format_work / mode, mode, inherited, layout=layout))
-            report['checks'].append(warm_reader_case(binary, library, format_work / 'warm-reader', inherited, layout=layout))
-            for mode in ('before-rename', 'after-rename', 'fail-sync'):
-                report['checks'].append(case(binary, library, format_work / ('new-create-' + mode),
-                                             mode, inherited, new_create=True, layout=layout))
+        report['checks'].extend(initialization_cases(binary, library, work / 'initialization', inherited))
+        for mode in ('before-rename', 'after-rename', 'fail-sync'):
+            report['checks'].append(case(binary, library, work / mode, mode, inherited))
+        report['checks'].append(warm_reader_case(binary, library, work / 'warm-reader', inherited))
+        for mode in ('before-rename', 'after-rename', 'fail-sync'):
+            report['checks'].append(case(binary, library, work / ('new-create-' + mode),
+                                         mode, inherited, new_create=True))
     assert not pathlib.Path(temporary).exists(), 'fault-test temporary files survived cleanup'
     report['cleaned'] = True
     return report
@@ -495,31 +599,23 @@ def run_mounts(binary, report):
                 'stderr': completed.stderr, 'elapsed_seconds': time.monotonic()-started}
 
     try:
-        result['ordinary_baselines'] = {}
-        for layout in ('v1', 'v2'):
-            baseline = work / ('ordinary-' + layout)
-            if layout == 'v1':
-                seed_storage(baseline, layout)
-            else:
-                baseline.mkdir(mode=0o700)
-            result['ordinary_baselines'][layout] = probe(baseline)
-            assert result['ordinary_baselines'][layout]['returncode'] == 0, result['ordinary_baselines'][layout]
-            assert_layout(baseline, layout)
+        baseline = work / 'ordinary'
+        baseline.mkdir(mode=0o700)
+        result['ordinary_baseline'] = probe(baseline)
+        assert result['ordinary_baseline']['returncode'] == 0, result['ordinary_baseline']
+        assert_layout(baseline)
         # A successful real filesystem qualification establishes that this
         # host root passes the adapter's local APFS and permission checks.
-        for layout, namespace in (('v1', 'objects'), ('v1', 'locks'), ('v2', 'objects-v2'), ('v2', 'locks')):
-            namespaces = ('objects' if layout == 'v1' else 'objects-v2', 'locks')
-            root = work / (layout + '-' + namespace + '-case')
+        for namespace in ('objects', 'locks'):
+            namespaces = ('objects', 'locks')
+            root = work / (namespace + '-case')
             root.mkdir(mode=0o700)
-            for name in namespaces:
-                (root / name).mkdir(mode=0o700)
-            image, mount = work / (layout + '-' + namespace + '.sparseimage'), root / namespace
-            row = {'layout': layout, 'namespace': namespace, 'image': str(image), 'mountpoint': str(mount)}
+            image, mount = work / (namespace + '.sparseimage'), root / namespace
+            row = {'namespace': namespace, 'image': str(image), 'mountpoint': str(mount)}
             result['checks'].append(row)
-            if layout == 'v2':
-                row['initialization'] = probe(root)
-                assert row['initialization']['returncode'] == 0, row['initialization']
-                assert_layout(root, layout)
+            row['initialization'] = probe(root)
+            assert row['initialization']['returncode'] == 0, row['initialization']
+            assert_layout(root)
             case = dict(root=root, image=image, mount=mount, namespaces=namespaces, attach_started=False, evidence=row)
             cases.append(case)
             try:
