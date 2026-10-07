@@ -9,8 +9,9 @@ Small, simple, and safe. Write ordinary functions. Completed steps are remembere
 Download the package for your platform from [Releases](https://github.com/deoos-dev/deoos/releases). Python 3.10+ and Node 22+ are required for their respective SDKs; no Rust compiler is needed. Choose the archive matching your operating system and CPU. Release notes list the available builds.
 
 ```sh
-python3 -m venv .venv
-.venv/bin/pip install /path/to/release/python/*.whl
+uv venv --python 3.12 .venv
+source .venv/bin/activate
+uv pip install /path/to/release/python/*.whl
 # In your Node project:
 npm install /path/to/release/node/*.tgz
 ```

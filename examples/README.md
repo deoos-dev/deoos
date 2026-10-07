@@ -4,7 +4,7 @@ These examples use the same workflows in library and server modes, with intercha
 
 ## Hacker News → DuckDB
 
-Mac Apple Silicon. Requires Python 3.12, Docker, AWS CLI and GitHub CLI. Run the steps in the same terminal, starting in this repository.
+Mac Apple Silicon. Requires uv, Docker, AWS CLI and GitHub CLI. Run the steps in the same terminal, starting in this repository.
 
 ### 1. Install
 
@@ -16,9 +16,9 @@ cd ~/try-deoos-hn
 gh release download 0.7.0-alpha.2 --repo deoos-dev/deoos \
   --pattern deoos-0.7.0-alpha.2-macos-arm64.tar.gz --clobber
 tar -xzf deoos-0.7.0-alpha.2-macos-arm64.tar.gz
-python3.12 -m venv .venv
+uv venv --python 3.12 .venv
 source .venv/bin/activate
-python -m pip install ./deoos-0.7.0-alpha.2-macos-arm64/python/*.whl duckdb==1.5.6
+uv pip install ./deoos-0.7.0-alpha.2-macos-arm64/python/*.whl duckdb==1.5.6
 cp "$DEOOS_SOURCE/examples/hacker_news.py" .
 ```
 
