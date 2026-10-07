@@ -4,95 +4,15 @@ These examples use the same workflows in library and server modes, with intercha
 
 ## Hacker News → DuckDB
 
-Mac Apple Silicon. Requires uv, Docker, AWS CLI and GitHub CLI. Run the steps in the same terminal, starting in this repository.
-
-### 1. Install
+Requires Mac Apple Silicon, uv, and running Docker. From this repository:
 
 ```sh
-export DEOOS_SOURCE="$PWD"
-mkdir -p ~/try-deoos-hn
-cd ~/try-deoos-hn
-
-gh release download 0.7.0-alpha.2 --repo deoos-dev/deoos \
-  --pattern deoos-0.7.0-alpha.2-macos-arm64.tar.gz --clobber
-tar -xzf deoos-0.7.0-alpha.2-macos-arm64.tar.gz
-uv venv --python 3.12 .venv
-source .venv/bin/activate
-uv pip install ./deoos-0.7.0-alpha.2-macos-arm64/python/*.whl duckdb==1.5.6
-cp "$DEOOS_SOURCE/examples/hacker_news.py" .
+./examples/hacker-news
 ```
 
-### 2. Start RustFS
+The launcher starts local RustFS and installs the released SDK and dependencies automatically. The demo collects 100 live Hacker News items, kills the worker after 20 stored items, restarts it, and prints SQL results from DuckDB.
 
-```sh
-docker compose -f "$DEOOS_SOURCE/compose.yaml" up -d
-
-export DEOOS_MODE=library DEOOS_STORAGE_PROVIDER=s3
-export AWS_ENDPOINT=http://127.0.0.1:19000 AWS_ALLOW_HTTP=true
-export AWS_ACCESS_KEY_ID=local-development
-export AWS_SECRET_ACCESS_KEY=local-development-only-secret
-export AWS_REGION=us-east-1 DEOOS_STORAGE_BUCKET=hacker-news-workflows
-unset AWS_SESSION_TOKEN
-export LEASE_MS=5000
-
-until curl -fsS "$AWS_ENDPOINT/health" >/dev/null; do sleep 1; done
-aws --endpoint-url "$AWS_ENDPOINT" s3api head-bucket --bucket "$DEOOS_STORAGE_BUCKET" \
-  || aws --endpoint-url "$AWS_ENDPOINT" s3 mb "s3://$DEOOS_STORAGE_BUCKET"
-```
-
-### 3. Submit 100 items
-
-```sh
-export TASK_ID="hn-$(date +%Y%m%d-%H%M%S)"
-export EXECUTION_PREFIX="$TASK_ID"
-export DATABASE="$PWD/$TASK_ID.duckdb"
-python hacker_news.py submit --id "$TASK_ID" --database "$DATABASE"
-```
-
-### 4. Start the worker and kill it
-
-```sh
-python hacker_news.py work --once >worker.log 2>&1 &
-WORKER_PID=$!
-sleep 2
-kill -9 "$WORKER_PID"
-wait "$WORKER_PID" 2>/dev/null || true
-python hacker_news.py inspect --id "$TASK_ID"
-```
-
-### 5. Wait for the lease to expire, then restart
-
-```sh
-sleep 6
-python hacker_news.py work --once
-python hacker_news.py inspect --id "$TASK_ID"
-```
-
-Expected status: `completed`.
-
-### 6. Query the database offline
-
-```sh
-python hacker_news.py query --database "$DATABASE"
-```
-
-Expected collection count: `100`.
-
-### 7. Optional: run every 24 hours
-
-```sh
-python hacker_news.py schedule --id daily-news --database "$DATABASE" --interval-ms 86400000
-python hacker_news.py work
-```
-
-Use one worker per DuckDB file. Restart with the same file and storage settings. Existing story payloads are preserved.
-
-For TypeScript (Node 22+), install and copy the Node example, then replace `python hacker_news.py` with `node hacker_news.mjs` in steps 3–7:
-
-```sh
-npm install ./deoos-0.7.0-alpha.2-macos-arm64/node/*.tgz @duckdb/node-api@1.5.6-r.1
-cp "$DEOOS_SOURCE/examples/hacker_news.mjs" .
-```
+Query the saved database again with `./examples/hacker-news --query`; this runs offline without Docker. No environment configuration is needed.
 
 ## Other use cases
 
