@@ -4,53 +4,95 @@ These examples use the same workflows in library and server modes, with intercha
 
 ## Hacker News → DuckDB
 
-`hacker_news.py` and `hacker_news.mjs` collect 100 items from the [Hacker News API](https://github.com/HackerNews/API) into a local DuckDB file. DEOOS remembers the chosen IDs and each fetch and database write. If the worker stops, restart it with the same configuration: completed steps return their saved results, and unfinished steps retry after the lease expires.
+Mac Apple Silicon. Requires Python 3.12, Docker, AWS CLI and GitHub CLI. Run the steps in the same terminal, starting in this repository.
 
-Install the DEOOS SDK as shown in the main README, then install the database client:
+### 1. Install
 
 ```sh
-python -m pip install duckdb==1.5.6
-# In your Node project, alongside deoos and hacker_news.mjs:
-npm install @duckdb/node-api@1.5.6-r.1
+export DEOOS_SOURCE="$PWD"
+mkdir -p ~/try-deoos-hn
+cd ~/try-deoos-hn
+
+gh release download 0.7.0-alpha.2 --repo deoos-dev/deoos \
+  --pattern deoos-0.7.0-alpha.2-macos-arm64.tar.gz --clobber
+tar -xzf deoos-0.7.0-alpha.2-macos-arm64.tar.gz
+python3.12 -m venv .venv
+source .venv/bin/activate
+python -m pip install ./deoos-0.7.0-alpha.2-macos-arm64/python/*.whl duckdb==1.5.6
+cp "$DEOOS_SOURCE/examples/hacker_news.py" .
 ```
 
-For a local trial, start RustFS with `docker compose up -d` from the source repository, then configure library mode and create a development bucket:
+### 2. Start RustFS
 
 ```sh
-export DEOOS_MODE=library
+docker compose -f "$DEOOS_SOURCE/compose.yaml" up -d
+
+export DEOOS_MODE=library DEOOS_STORAGE_PROVIDER=s3
 export AWS_ENDPOINT=http://127.0.0.1:19000 AWS_ALLOW_HTTP=true
 export AWS_ACCESS_KEY_ID=local-development
 export AWS_SECRET_ACCESS_KEY=local-development-only-secret
 export AWS_REGION=us-east-1 DEOOS_STORAGE_BUCKET=hacker-news-workflows
-export EXECUTION_PREFIX=hacker-news
-aws --endpoint-url "$AWS_ENDPOINT" s3 mb "s3://$DEOOS_STORAGE_BUCKET"
+unset AWS_SESSION_TOKEN
+export LEASE_MS=5000
+
+until curl -fsS "$AWS_ENDPOINT/health" >/dev/null; do sleep 1; done
+aws --endpoint-url "$AWS_ENDPOINT" s3api head-bucket --bucket "$DEOOS_STORAGE_BUCKET" \
+  || aws --endpoint-url "$AWS_ENDPOINT" s3 mb "s3://$DEOOS_STORAGE_BUCKET"
 ```
 
-From the directory where you copied the example, run:
+### 3. Submit 100 items
 
 ```sh
-python hacker_news.py submit --id collection-001
+export TASK_ID="hn-$(date +%Y%m%d-%H%M%S)"
+export EXECUTION_PREFIX="$TASK_ID"
+export DATABASE="$PWD/$TASK_ID.duckdb"
+python hacker_news.py submit --id "$TASK_ID" --database "$DATABASE"
+```
+
+### 4. Start the worker and kill it
+
+```sh
+python hacker_news.py work --once >worker.log 2>&1 &
+WORKER_PID=$!
+sleep 2
+kill -9 "$WORKER_PID"
+wait "$WORKER_PID" 2>/dev/null || true
+python hacker_news.py inspect --id "$TASK_ID"
+```
+
+### 5. Wait for the lease to expire, then restart
+
+```sh
+sleep 6
 python hacker_news.py work --once
-python hacker_news.py inspect --id collection-001
-python hacker_news.py query
+python hacker_news.py inspect --id "$TASK_ID"
 ```
 
-Replace `python hacker_news.py` with `node hacker_news.mjs` for TypeScript. Both use the same handler and checkpoint names, so either worker can resume the other. `query` reads only the DuckDB file and works offline. Change the task ID for a new collection; `--database` chooses its file.
+Expected status: `completed`.
 
-For scheduled collection, use `schedule --id daily-news --interval-ms 86400000`, then `work` without `--once`. Workers admit due runs while polling. These are fixed intervals, and an occurrence is skipped when the previous run is still active. Use the main README's server instructions and set `DEOOS_MODE=server`, `ENGINE_URL` and `ENGINE_TOKEN` to run the same example in server mode.
-
-The database has two tables: `stories` stores the first captured JSON payload for each ID, and `collections` stores each task's IDs and order. Inserts use `ON CONFLICT DO NOTHING` in one transaction. A retry after a database commit but before its DEOOS checkpoint preserves existing rows. Later collections also preserve the first payload; this example does not refresh changing stories. Missing or deleted items are retained, so 100 IDs need not mean 100 article links.
-
-Use one worker per DuckDB file, and restart on the same machine or persistent volume. Server mode shares execution state, not the worker's local database. In cloud deployments, put workers near their object store; for self-hosting, keep workers beside RustFS.
-
-The source test `tests/hacker_news.py` exercises both SDKs and modes, API failure, two forced worker stops (including the commit/checkpoint gap), preservation of an existing marked row, scheduled runs and offline queries. It captures 100 items from the real API once and replays those responses across the cases. With RustFS running, the SDKs installed, and the Node example inside your Node project, run:
+### 6. Query the database offline
 
 ```sh
-ENGINE_BINARY=/path/to/deoos-server python tests/hacker_news.py \
-  --node-example /path/to/your/node-project/hacker_news.mjs
+python hacker_news.py query --database "$DATABASE"
 ```
 
-The test needs `boto3` in the Python environment to create and remove its isolated RustFS bucket.
+Expected collection count: `100`.
+
+### 7. Optional: run every 24 hours
+
+```sh
+python hacker_news.py schedule --id daily-news --database "$DATABASE" --interval-ms 86400000
+python hacker_news.py work
+```
+
+Use one worker per DuckDB file. Restart with the same file and storage settings. Existing story payloads are preserved.
+
+For TypeScript (Node 22+), install and copy the Node example, then replace `python hacker_news.py` with `node hacker_news.mjs` in steps 3–7:
+
+```sh
+npm install ./deoos-0.7.0-alpha.2-macos-arm64/node/*.tgz @duckdb/node-api@1.5.6-r.1
+cp "$DEOOS_SOURCE/examples/hacker_news.mjs" .
+```
 
 ## Other use cases
 
