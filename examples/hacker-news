@@ -30,7 +30,7 @@ if ! docker info >/dev/null 2>&1; then
   done
   docker info >/dev/null 2>&1 || { echo 'Docker did not become ready.' >&2; exit 1; }
 fi
-docker compose -f "$root/compose.yaml" up -d
+docker compose -p deoos -f "$root/compose.yaml" up -d
 
 wheels=("$root"/python/*.whl)
 [[ -f ${wheels[0]} ]] || wheels=("$release"/python/*.whl)
