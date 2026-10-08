@@ -18,7 +18,7 @@ if backend=='aws':
 else:
  os.environ.update(AWS_ACCESS_KEY_ID='local-development',AWS_SECRET_ACCESS_KEY='local-development-only-secret',AWS_REGION='us-east-1',AWS_ENDPOINT='http://127.0.0.1:19000',AWS_ALLOW_HTTP='true');os.environ.pop('AWS_SESSION_TOKEN',None)
  s3=boto3.client('s3',endpoint_url=os.environ['AWS_ENDPOINT'],region_name='us-east-1')
-os.environ.update(AWS_BUCKET=bucket,LEASE_MS='6000')
+os.environ.update(DEOOS_STORAGE_BUCKET=bucket,LEASE_MS='6000')
 server_binary=pathlib.Path(os.environ.get('ENGINE_BINARY',str(ROOT/'engine/target/debug'/('deoos-server.exe' if os.name=='nt' else 'deoos-server')))).resolve()
 native_name={'Darwin':'libdeoos_engine.dylib','Linux':'libdeoos_engine.so','Windows':'deoos_engine.dll'}[platform.system()]
 report['bucket']=bucket
@@ -29,7 +29,7 @@ try:
  if backend=='aws':s3.put_public_access_block(Bucket=bucket,PublicAccessBlockConfiguration={k:True for k in ['BlockPublicAcls','IgnorePublicAcls','BlockPublicPolicy','RestrictPublicBuckets']})
  for mode in ['library','server']:
   passed=[];server=None;workers=[];clients=[]
-  os.environ.update(EXECUTION_PREFIX='modes %/'+uuid.uuid4().hex,WORKER_MODE=mode,ENGINE_URL='http://127.0.0.1:17351',ENGINE_BIND='0.0.0.0:17351',ENGINE_TOKEN='acceptance-test-only-token')
+  os.environ.update(EXECUTION_PREFIX='modes %/'+uuid.uuid4().hex,DEOOS_MODE=mode,ENGINE_URL='http://127.0.0.1:17351',ENGINE_BIND='0.0.0.0:17351',ENGINE_TOKEN='acceptance-test-only-token')
   with tempfile.TemporaryDirectory() as scratch:
    def create():
     c=Client(bucket=bucket) if mode=='library' else Client.remote(os.environ['ENGINE_URL'],os.environ['ENGINE_TOKEN']);clients.append(c);return c
@@ -112,11 +112,11 @@ try:
     assert info['process_id']==(os.getpid() if mode=='library' else server.pid)
     child_env=dict(os.environ)
     if mode=='server':
-     child_env={k:v for k,v in child_env.items() if not k.startswith('AWS_') and k not in ['EXECUTION_PREFIX','DEOOS_NATIVE_LIBRARY','DEOOS_NODE_LIBRARY']}
-    script="import {Client} from './clients/typescript/dist/index.js';const c=process.env.WORKER_MODE==='library'?new Client({bucket:process.env.AWS_BUCKET,prefix:process.env.EXECUTION_PREFIX}):Client.remote(process.env.ENGINE_URL,process.env.ENGINE_TOKEN);if(process.env.WORKER_MODE==='library')globalThis.fetch=()=>{throw new Error('library used HTTP');};const i=await c.request('/info');if(process.env.WORKER_MODE==='library'&&i.process_id!==process.pid)throw new Error('engine not embedded');console.log(i.process_id);"
+     child_env={k:v for k,v in child_env.items() if not k.startswith(('AWS_', 'DEOOS_STORAGE_')) and k not in ['EXECUTION_PREFIX','DEOOS_NATIVE_LIBRARY','DEOOS_NODE_LIBRARY']}
+    script="import {Client} from './clients/typescript/dist/index.js';const c=process.env.DEOOS_MODE==='library'?new Client({bucket:process.env.DEOOS_STORAGE_BUCKET,prefix:process.env.EXECUTION_PREFIX}):Client.remote(process.env.ENGINE_URL,process.env.ENGINE_TOKEN);if(process.env.DEOOS_MODE==='library')globalThis.fetch=()=>{throw new Error('library used HTTP');};const i=await c.request('/info');if(process.env.DEOOS_MODE==='library'&&i.process_id!==process.pid)throw new Error('engine not embedded');console.log(i.process_id);"
     subprocess.run(['node','--input-type=module','-e',script],cwd=ROOT,env=child_env,check=True,capture_output=True,text=True)
     passed.append('Python and Node engine process identity proves selected mode')
-    script="import {Client} from './clients/typescript/dist/index.js';const c=process.env.WORKER_MODE==='library'?new Client({bucket:process.env.AWS_BUCKET,prefix:process.env.EXECUTION_PREFIX}):Client.remote(process.env.ENGINE_URL,process.env.ENGINE_TOKEN);await c.submit('prototype-steps','prototype-steps',{});await c.runOnce({'prototype-steps':async ctx=>{const a=await ctx.step('constructor',()=>21);const b=await ctx.step('toString',()=>21);return a+b;}});if((await c.request('/tasks/prototype-steps')).output!==42)throw new Error('prototype step names failed');"
+    script="import {Client} from './clients/typescript/dist/index.js';const c=process.env.DEOOS_MODE==='library'?new Client({bucket:process.env.DEOOS_STORAGE_BUCKET,prefix:process.env.EXECUTION_PREFIX}):Client.remote(process.env.ENGINE_URL,process.env.ENGINE_TOKEN);await c.submit('prototype-steps','prototype-steps',{});await c.runOnce({'prototype-steps':async ctx=>{const a=await ctx.step('constructor',()=>21);const b=await ctx.step('toString',()=>21);return a+b;}});if((await c.request('/tasks/prototype-steps')).output!==42)throw new Error('prototype step names failed');"
     subprocess.run(['node','--input-type=module','-e',script],cwd=ROOT,env=child_env,check=True,capture_output=True,text=True)
     passed.append('TypeScript checkpoints accept constructor and toString names')
     racers=[create() for _ in range(8)]
@@ -152,7 +152,7 @@ try:
      assert [entry for entry in replacement['history'] if entry['event']=='claim'][-1]['at_ms']>=old['expires_at']
      replacement=mutate(b,replacement,'renew')
      python_stale="""import json,os,pathlib;from deoos import Client,Context,EngineError
-c=Client(bucket=os.environ['AWS_BUCKET']) if os.environ['WORKER_MODE']=='library' else Client.remote(os.environ['ENGINE_URL'],os.environ['ENGINE_TOKEN'])
+c=Client(bucket=os.environ['DEOOS_STORAGE_BUCKET']) if os.environ['DEOOS_MODE']=='library' else Client.remote(os.environ['ENGINE_URL'],os.environ['ENGINE_TOKEN'])
 ctx=Context(c,json.loads(os.environ['OLD_TASK']))
 def effect():pathlib.Path(os.environ['EFFECT']).touch()
 try:ctx.step('first',effect)
@@ -167,7 +167,7 @@ c.close()
 """
      node_stale="""import {Client,Context,EngineError} from './clients/typescript/dist/index.js';
 import {writeFileSync} from 'node:fs';
-const c=process.env.WORKER_MODE==='library'?new Client({bucket:process.env.AWS_BUCKET,prefix:process.env.EXECUTION_PREFIX}):Client.remote(process.env.ENGINE_URL,process.env.ENGINE_TOKEN);
+const c=process.env.DEOOS_MODE==='library'?new Client({bucket:process.env.DEOOS_STORAGE_BUCKET,prefix:process.env.EXECUTION_PREFIX}):Client.remote(process.env.ENGINE_URL,process.env.ENGINE_TOKEN);
 const ctx=new Context(c,JSON.parse(process.env.OLD_TASK));const effect=()=>writeFileSync(process.env.EFFECT,'executed');
 try{await ctx.step('first',effect);throw new Error('stale checkpoint accepted');}
 catch(error){if(!(error instanceof EngineError)||error.status!==409)throw error;}
@@ -207,7 +207,7 @@ for(const operation of [()=>ctx.step('second',effect),()=>ctx.spawn('late-child'
     trace=pathlib.Path(scratch)/'trace';ready=pathlib.Path(scratch)/'ready'
     a.submit('recovery','work',dict(trace=str(trace),ready=str(ready),number=20,pause=120),max_attempts=5)
     env=dict(child_env,PYTHONPATH=str(ROOT/'clients/python'))
-    p=subprocess.Popen([sys.executable,str(ROOT/'examples/mode_worker.py')],env=env);workers.append(p)
+    p=subprocess.Popen([sys.executable,str(ROOT/'tests/fixtures/mode_worker.py')],env=env);workers.append(p)
     for _ in range(200):
      if p.poll() is not None:raise AssertionError('worker stopped before checkpoint')
      if ready.exists():break
@@ -219,7 +219,7 @@ for(const operation of [()=>ctx.step('second',effect),()=>ctx.spawn('late-child'
     if server:
      server.kill();server.wait();server=subprocess.Popen([str(server_binary)],env=os.environ.copy(),stdout=log.open('a'),stderr=subprocess.STDOUT)
     time.sleep(6.3)
-    subprocess.run(['node',str(ROOT/'examples/mode_worker.mjs')],env=env,check=True,timeout=30)
+    subprocess.run(['node',str(ROOT/'tests/fixtures/mode_worker.mjs')],env=env,check=True,timeout=30)
     c=create();a=c;state=c.request('/tasks/recovery');assert state['status']=='completed' and state['output']=={'number':42};assert trace.read_text()=='first\n'
     passed.append('killed Python worker; fresh Node worker resumed committed checkpoint from S3')
     if mode=='server':passed.append('shared server killed and reconstructed solely from object-store state')
@@ -227,7 +227,7 @@ for(const operation of [()=>ctx.step('second',effect),()=>ctx.spawn('late-child'
     workflow_trace=pathlib.Path(scratch)/'workflow-trace';workflow_ready=pathlib.Path(scratch)/'workflow-ready'
     a.submit('pipeline','pipeline',{'trace':str(workflow_trace),'ready':str(workflow_ready)},max_attempts=2)
     python_parent="""import os,pathlib,time;from deoos import Client
-c=Client(bucket=os.environ['AWS_BUCKET']) if os.environ['WORKER_MODE']=='library' else Client.remote(os.environ['ENGINE_URL'],os.environ['ENGINE_TOKEN'])
+c=Client(bucket=os.environ['DEOOS_STORAGE_BUCKET']) if os.environ['DEOOS_MODE']=='library' else Client.remote(os.environ['ENGINE_URL'],os.environ['ENGINE_TOKEN'])
 original_submit=c.submit
 def paused_submit(task_id,*args,**kwargs):
  result=original_submit(task_id,*args,**kwargs)
@@ -250,7 +250,7 @@ c.run_once({'pipeline':parent})
     parent_process.kill();parent_process.wait()
     assert 'left' not in a.request('/tasks/pipeline')['steps'],'crash must precede parent checkpoint'
     time.sleep(6.3)
-    node_header="import {Client,ChildFailed} from './clients/typescript/dist/index.js';import{appendFileSync}from'node:fs';const c=process.env.WORKER_MODE==='library'?new Client({bucket:process.env.AWS_BUCKET,prefix:process.env.EXECUTION_PREFIX}):Client.remote(process.env.ENGINE_URL,process.env.ENGINE_TOKEN);"
+    node_header="import {Client,ChildFailed} from './clients/typescript/dist/index.js';import{appendFileSync}from'node:fs';const c=process.env.DEOOS_MODE==='library'?new Client({bucket:process.env.DEOOS_STORAGE_BUCKET,prefix:process.env.EXECUTION_PREFIX}):Client.remote(process.env.ENGINE_URL,process.env.ENGINE_TOKEN);"
     node_parent=node_header+"await c.runOnce({pipeline:async(ctx,inputs)=>{const left=await ctx.spawn('left','double',{number:5,trace:inputs.trace});const right=await ctx.spawn('right','double',{number:7,trace:inputs.trace});const values=await ctx.join('parts',[left,right]);return values.reduce((a,b)=>a+b,0);}});"
     subprocess.run(['node','--input-type=module','-e',node_parent],cwd=ROOT,env=env,check=True,capture_output=True,text=True)
     parent=a.request('/tasks/pipeline');assert parent['status']=='waiting' and parent['attempts']==2 and parent['expires_at']==0
@@ -261,7 +261,7 @@ c.run_once({'pipeline':parent})
     for process in children:
      stdout,stderr=process.communicate(timeout=30);assert process.returncode==0,stderr
     python_resume="""import os;from deoos import Client
-c=Client(bucket=os.environ['AWS_BUCKET']) if os.environ['WORKER_MODE']=='library' else Client.remote(os.environ['ENGINE_URL'],os.environ['ENGINE_TOKEN'])
+c=Client(bucket=os.environ['DEOOS_STORAGE_BUCKET']) if os.environ['DEOOS_MODE']=='library' else Client.remote(os.environ['ENGINE_URL'],os.environ['ENGINE_TOKEN'])
 def parent(ctx,inputs):
  left=ctx.spawn('left','double',{'number':5,'trace':inputs['trace']})
  right=ctx.spawn('right','double',{'number':7,'trace':inputs['trace']})
@@ -283,7 +283,7 @@ c.close()
      script=node_header+f"await c.runOnce({{'{identifier}':async ctx=>{{const id=await ctx.spawn('child','will-fail',{{}},1);return ctx.join('child-result',[id]);}}}});"
      subprocess.run(['node','--input-type=module','-e',script],cwd=ROOT,env=env,check=True,capture_output=True,text=True)
      failer="""import os;from deoos import Client,ChildFailed
-c=Client(bucket=os.environ['AWS_BUCKET']) if os.environ['WORKER_MODE']=='library' else Client.remote(os.environ['ENGINE_URL'],os.environ['ENGINE_TOKEN'])
+c=Client(bucket=os.environ['DEOOS_STORAGE_BUCKET']) if os.environ['DEOOS_MODE']=='library' else Client.remote(os.environ['ENGINE_URL'],os.environ['ENGINE_TOKEN'])
 def fail(ctx,inputs):raise ValueError('deliberate child failure')
 try:c.run_once({'will-fail':fail})
 except ValueError:pass
@@ -292,7 +292,7 @@ c.close()
      subprocess.run([sys.executable,'-c',failer],env=env,check=True,capture_output=True,text=True)
      script=node_header+f"try{{await c.runOnce({{'{identifier}':async ctx=>{{const id=await ctx.spawn('child','will-fail',{{}},1);try{{return await ctx.join('child-result',[id]);}}catch(e){{if({str(caught).lower()}&&e instanceof ChildFailed)return 'compensated';throw e;}}}}}});}}catch(e){{if(!(e instanceof ChildFailed))throw e;}}"
      python_caught="""import os;from deoos import Client,ChildFailed
-c=Client(bucket=os.environ['AWS_BUCKET']) if os.environ['WORKER_MODE']=='library' else Client.remote(os.environ['ENGINE_URL'],os.environ['ENGINE_TOKEN'])
+c=Client(bucket=os.environ['DEOOS_STORAGE_BUCKET']) if os.environ['DEOOS_MODE']=='library' else Client.remote(os.environ['ENGINE_URL'],os.environ['ENGINE_TOKEN'])
 def parent(ctx,inputs):
  child=ctx.spawn('child','will-fail',{},1)
  try:return ctx.join('child-result',[child])
@@ -310,7 +310,7 @@ c.close()
      task_id='broad-catch-'+language+('-wrap' if wrap else '-return')
      a.submit(task_id,task_id,{'trace':str(workflow_trace)},max_attempts=1)
      python_script="""import os;from deoos import Client
-c=Client(bucket=os.environ['AWS_BUCKET']) if os.environ['WORKER_MODE']=='library' else Client.remote(os.environ['ENGINE_URL'],os.environ['ENGINE_TOKEN'])
+c=Client(bucket=os.environ['DEOOS_STORAGE_BUCKET']) if os.environ['DEOOS_MODE']=='library' else Client.remote(os.environ['ENGINE_URL'],os.environ['ENGINE_TOKEN'])
 def parent(ctx,inputs):
  child=ctx.spawn('child','double',{'number':11,'trace':inputs['trace']})
  try:return ctx.join('joined',[child])
@@ -333,7 +333,7 @@ c.close()
     wait_ready=pathlib.Path(scratch)/'wait-ready'
     a.submit('approval','approval',{},max_attempts=1)
     python_wait="""import os,pathlib,time;from deoos import Client
-c=Client(bucket=os.environ['AWS_BUCKET']) if os.environ['WORKER_MODE']=='library' else Client.remote(os.environ['ENGINE_URL'],os.environ['ENGINE_TOKEN'])
+c=Client(bucket=os.environ['DEOOS_STORAGE_BUCKET']) if os.environ['DEOOS_MODE']=='library' else Client.remote(os.environ['ENGINE_URL'],os.environ['ENGINE_TOKEN'])
 original_request=c.request
 def paused_request(path,data=None):
  result=original_request(path,data)
@@ -365,7 +365,7 @@ c.run_once({'approval':work})
     a.signal('approval','approval',{'approved':True,'number':5})
     expect_status(409,lambda:a.signal('approval','approval',{'approved':False}))
     python_finish="""import os;from deoos import Client
-c=Client(bucket=os.environ['AWS_BUCKET']) if os.environ['WORKER_MODE']=='library' else Client.remote(os.environ['ENGINE_URL'],os.environ['ENGINE_TOKEN'])
+c=Client(bucket=os.environ['DEOOS_STORAGE_BUCKET']) if os.environ['DEOOS_MODE']=='library' else Client.remote(os.environ['ENGINE_URL'],os.environ['ENGINE_TOKEN'])
 def work(ctx,inputs):
  ctx.sleep('cooldown',3000)
  return ctx.wait_signal('approval')
@@ -422,7 +422,7 @@ c.close()
      task_id='cancel-boundary-'+language;ready_file=pathlib.Path(scratch)/(task_id+'-ready');continue_file=pathlib.Path(scratch)/(task_id+'-continue');effect_file=pathlib.Path(scratch)/(task_id+'-effect')
      a.submit(task_id,task_id,{})
      python_cancel="""import os,pathlib,time;from deoos import Client
-c=Client(bucket=os.environ['AWS_BUCKET']) if os.environ['WORKER_MODE']=='library' else Client.remote(os.environ['ENGINE_URL'],os.environ['ENGINE_TOKEN'])
+c=Client(bucket=os.environ['DEOOS_STORAGE_BUCKET']) if os.environ['DEOOS_MODE']=='library' else Client.remote(os.environ['ENGINE_URL'],os.environ['ENGINE_TOKEN'])
 def work(ctx,inputs):
  pathlib.Path(os.environ['READY']).touch()
  while not pathlib.Path(os.environ['CONTINUE']).exists():time.sleep(.05)
@@ -461,7 +461,7 @@ c.close()
     expect_status(409,lambda:a.submit('code-v1','code.v2',{}))
     a.signal('code-v1','continue',True)
     version_resume="""import os;from deoos import Client
-c=Client(bucket=os.environ['AWS_BUCKET']) if os.environ['WORKER_MODE']=='library' else Client.remote(os.environ['ENGINE_URL'],os.environ['ENGINE_TOKEN'])
+c=Client(bucket=os.environ['DEOOS_STORAGE_BUCKET']) if os.environ['DEOOS_MODE']=='library' else Client.remote(os.environ['ENGINE_URL'],os.environ['ENGINE_TOKEN'])
 def work(ctx,inputs):
  result=ctx.step('schema',lambda:(_ for _ in ()).throw(AssertionError('replayed callback')),revision='1')
  ctx.sleep('cooldown',0)
@@ -480,7 +480,7 @@ c.close()
     subprocess.run(['node','--input-type=module','-e',script],cwd=ROOT,env=env,check=True,capture_output=True,text=True)
     a.signal('contracts','continue',True)
     contract_resume="""import os;from deoos import Client,EngineError
-c=Client(bucket=os.environ['AWS_BUCKET']) if os.environ['WORKER_MODE']=='library' else Client.remote(os.environ['ENGINE_URL'],os.environ['ENGINE_TOKEN'])
+c=Client(bucket=os.environ['DEOOS_STORAGE_BUCKET']) if os.environ['DEOOS_MODE']=='library' else Client.remote(os.environ['ENGINE_URL'],os.environ['ENGINE_TOKEN'])
 def work(ctx,inputs):
  def forbidden():raise AssertionError('incompatible callback executed')
  changes=[lambda:ctx.step('plain',forbidden,revision='2'),lambda:ctx.sleep('plain',0),lambda:ctx.wait_signal('slept'),lambda:ctx.sleep('slept',1),lambda:ctx.join('joined',['does-not-exist']),lambda:ctx.spawn('plain','should-not-exist',{}),lambda:ctx.spawn('spawned','unused-child',{'number':6})]
@@ -564,7 +564,7 @@ await c.runOnce({contracts:async ctx=>{
     # Operator retry uses observed revision and retains completed work.
     a.submit('ops-retry','ops-retry.v1',{},max_attempts=1)
     script="""import os;from deoos import Client
-c=Client(bucket=os.environ['AWS_BUCKET']) if os.environ['WORKER_MODE']=='library' else Client.remote(os.environ['ENGINE_URL'],os.environ['ENGINE_TOKEN'])
+c=Client(bucket=os.environ['DEOOS_STORAGE_BUCKET']) if os.environ['DEOOS_MODE']=='library' else Client.remote(os.environ['ENGINE_URL'],os.environ['ENGINE_TOKEN'])
 def work(ctx,inputs):
  value=ctx.step('saved',lambda:42)
  try:ctx.log('😃'*1025)
@@ -644,7 +644,7 @@ else:raise AssertionError('worker did not fail')
       except OSError:time.sleep(.1)
      else:raise AssertionError('schedule server unavailable')
     a,b=create(),create();child_env=dict(os.environ)
-    if mode=='server':child_env={k:v for k,v in child_env.items() if not k.startswith('AWS_') and k not in ['EXECUTION_PREFIX','DEOOS_NATIVE_LIBRARY','DEOOS_NODE_LIBRARY']}
+    if mode=='server':child_env={k:v for k,v in child_env.items() if not k.startswith(('AWS_', 'DEOOS_STORAGE_')) and k not in ['EXECUTION_PREFIX','DEOOS_NATIVE_LIBRARY','DEOOS_NODE_LIBRARY']}
     env=dict(child_env,PYTHONPATH=str(ROOT/'clients/python'))
     script=node_header+"const first=await c.schedule('node-control','node-control.v1',{},86400000);await new Promise(r=>setTimeout(r,10));const replay=await c.schedule('node-control','node-control.v1',{},86400000);if(replay.first_due_ms!==first.first_due_ms)throw new Error('default anchor changed');if(!(await c.pauseSchedule('node-control')).paused)throw new Error('pause failed');if((await c.resumeSchedule('node-control')).paused)throw new Error('resume failed');const job=await c.backfill('node-control',first.first_due_ms,first.first_due_ms+1,1);if(job.backfill.remaining!==1)throw new Error('backfill failed');await c.pauseSchedule('node-control');const state=await c.inspectSchedule('node-control');if(!state.paused||state.backfill.remaining!==1)throw new Error('inspect failed');"
     subprocess.run(['node','--input-type=module','-e',script],cwd=ROOT,env=env,check=True,capture_output=True,text=True)
@@ -652,7 +652,7 @@ else:raise AssertionError('worker did not fail')
     schedule_trace=pathlib.Path(scratch)/'schedule-trace'
     node_scheduled=node_header+"await c.runOnce({[process.env.HANDLER]:async ctx=>ctx.step('emit',()=>{appendFileSync(process.env.TRACE,JSON.stringify(ctx.task.schedule)+'\\n');return ctx.task.schedule;})});"
     python_scheduled="""import json,os;from deoos import Client
-c=Client(bucket=os.environ['AWS_BUCKET']) if os.environ['WORKER_MODE']=='library' else Client.remote(os.environ['ENGINE_URL'],os.environ['ENGINE_TOKEN'])
+c=Client(bucket=os.environ['DEOOS_STORAGE_BUCKET']) if os.environ['DEOOS_MODE']=='library' else Client.remote(os.environ['ENGINE_URL'],os.environ['ENGINE_TOKEN'])
 def work(ctx,inputs):
  def emit():
   with open(os.environ['TRACE'],'a') as trace:trace.write(json.dumps(ctx.task['schedule'])+'\\n')
@@ -801,7 +801,7 @@ c.close()
       a.request('/tasks/'+orphan_id+'/definitions/saved',dict(token=t['token'],operation_id='define-orphan',value={'kind':'step','revision':'1'}))
       proxy.arm('pause-result-response')
       mutation=dict(token=t['token'],operation_id='orphan-upload',value={'uncommitted':True})
-      script="import json,os;from deoos import Client;c=Client(bucket=os.environ['AWS_BUCKET']) if os.environ['WORKER_MODE']=='library' else Client.remote(os.environ['ENGINE_URL'],os.environ['ENGINE_TOKEN']);c.request('/tasks/'+os.environ['ORPHAN_ID']+'/steps/saved',json.loads(os.environ['MUTATION']))"
+      script="import json,os;from deoos import Client;c=Client(bucket=os.environ['DEOOS_STORAGE_BUCKET']) if os.environ['DEOOS_MODE']=='library' else Client.remote(os.environ['ENGINE_URL'],os.environ['ENGINE_TOKEN']);c.request('/tasks/'+os.environ['ORPHAN_ID']+'/steps/saved',json.loads(os.environ['MUTATION']))"
       child=subprocess.Popen([sys.executable,'-c',script],env=dict(fault_env,MUTATION=json.dumps(mutation),ORPHAN_ID=orphan_id),stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
       assert proxy.ready.wait(15),'immutable result upload never reached proxy'
       child.kill();child.wait()
@@ -838,7 +838,7 @@ c.close()
        identifier='gap-'+gap+'-'+mode;handler=identifier+'.v1';anchor=int(time.time()*1000)-1000
        a.schedule(identifier,handler,{},86400000,first_due_ms=anchor)
        proxy.arm('pause-schedule-intent-response' if gap=='intent' else 'pause-scheduled-task-response')
-       script="import os;from deoos import Client;c=Client(bucket=os.environ['AWS_BUCKET']) if os.environ['WORKER_MODE']=='library' else Client.remote(os.environ['ENGINE_URL'],os.environ['ENGINE_TOKEN']);c.run_once({os.environ['HANDLER']:lambda ctx,inputs:True})"
+       script="import os;from deoos import Client;c=Client(bucket=os.environ['DEOOS_STORAGE_BUCKET']) if os.environ['DEOOS_MODE']=='library' else Client.remote(os.environ['ENGINE_URL'],os.environ['ENGINE_TOKEN']);c.run_once({os.environ['HANDLER']:lambda ctx,inputs:True})"
        child=subprocess.Popen([sys.executable,'-c',script],env=dict(fault_env,HANDLER=handler),stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
        assert proxy.ready.wait(15),'schedule durability gap never reached proxy'
        pending=a.inspect_schedule(identifier)['pending'];assert pending and pending['due_ms']==anchor

@@ -43,7 +43,7 @@ def create_client():
         bucket = os.environ.get("DEOOS_STORAGE_BUCKET") or (
             os.environ.get("AWS_BUCKET") if provider == "s3" else None)
         if not bucket:
-            raise ValueError("DEOOS_STORAGE_BUCKET is required in library mode (AWS_BUCKET is an S3 fallback)")
+            raise ValueError("DEOOS_STORAGE_BUCKET is required in library mode")
         return Client(provider=provider, bucket=bucket, prefix=os.environ.get("EXECUTION_PREFIX", "deoos"))
     raise ValueError("DEOOS_MODE must be 'library' or 'server'")
 

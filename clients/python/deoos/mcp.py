@@ -3,6 +3,8 @@
 Wire contract: modelcontextprotocol.io/specification/2025-11-25/basic/transports
 Only the classic initialization lifecycle is supported, not the 2026 protocol.
 """
+from importlib.metadata import version
+
 import json
 import math
 import os
@@ -195,7 +197,7 @@ class Server:
                 self.phase = "negotiated"
                 self._send(request_id, result={"protocolVersion": PROTOCOL_VERSION,
                            "capabilities": {"tools": {}},
-                           "serverInfo": {"name": "deoos", "version": "0.6.0"},
+                           "serverInfo": {"name": "deoos", "version": version("deoos")},
                            "instructions": INSTRUCTIONS})
             elif method == "ping":
                 self._params(params, set())

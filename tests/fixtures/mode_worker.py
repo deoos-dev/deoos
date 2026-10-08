@@ -1,7 +1,7 @@
 """Recovery test worker; chooses one of the two public SDK modes."""
 import os,time
 from deoos import Client
-client=Client(bucket=os.environ['AWS_BUCKET']) if os.environ['WORKER_MODE']=='library' else Client.remote(os.environ['ENGINE_URL'],os.environ.get('ENGINE_TOKEN'))
+client=Client(bucket=os.environ['DEOOS_STORAGE_BUCKET']) if os.environ['DEOOS_MODE']=='library' else Client.remote(os.environ['ENGINE_URL'],os.environ.get('ENGINE_TOKEN'))
 def work(ctx,inputs):
     def first():
         with open(inputs['trace'],'a') as f:f.write('first\n')

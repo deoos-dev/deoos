@@ -108,7 +108,7 @@ def storage_environment(backend, bucket):
         if endpoint or alternate:
             env["AZURE_STORAGE_ENDPOINT"] = endpoint or alternate
     if env["DEOOS_STORAGE_PROVIDER"] == "s3":
-        env["AWS_BUCKET"] = bucket
+        env["DEOOS_STORAGE_BUCKET"] = bucket
     endpoint = env.get("AWS_ENDPOINT") or env.get("AZURE_STORAGE_ENDPOINT")
     if endpoint:
         parsed = urllib.parse.urlsplit(endpoint)

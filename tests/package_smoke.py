@@ -109,7 +109,7 @@ def runtime_info(mode, python, node, env, cwd, server_pid):
         "?Client.remote(process.env.ENGINE_URL,process.env.ENGINE_TOKEN) "
         ":new Client(process.env.DEOOS_STORAGE_PROVIDER==='filesystem' "
         "?{provider:'filesystem',directory:process.env.DEOOS_STORAGE_DIRECTORY}:"
-        "{bucket:process.env.AWS_BUCKET}); const i=await c.request('/info'); "
+        "{bucket:process.env.DEOOS_STORAGE_BUCKET}); const i=await c.request('/info'); "
         "console.log(JSON.stringify({platform:process.platform,arch:process.arch,"
         "version:process.version,client_pid:process.pid,engine_pid:i.process_id}));"
     )
@@ -489,7 +489,7 @@ const c = process.env.DEOOS_MODE === 'server'
   ? Client.remote(process.env.ENGINE_URL, process.env.ENGINE_TOKEN)
   : new Client(process.env.DEOOS_STORAGE_PROVIDER === 'filesystem'
     ? {provider: 'filesystem', directory: process.env.DEOOS_STORAGE_DIRECTORY}
-    : {bucket: process.env.AWS_BUCKET});
+    : {bucket: process.env.DEOOS_STORAGE_BUCKET});
 const passed = [];
 const secrets = ['INPUT-PAYLOAD-SENTINEL', 'CHECKPOINT-PAYLOAD-SENTINEL',
   'SIGNAL-PAYLOAD-SENTINEL', 'OUTPUT-PAYLOAD-SENTINEL'];
@@ -803,7 +803,7 @@ def main():
                           aws_access_key_id=env["AWS_ACCESS_KEY_ID"],
                           aws_secret_access_key=env["AWS_SECRET_ACCESS_KEY"])
     if bucket is not None:
-        env["AWS_BUCKET"] = bucket
+        env["DEOOS_STORAGE_BUCKET"] = bucket
     report = {"backend": args.backend, "release": str(package), "release_hashes": release_hashes,
               "server_version": server_version, "modes": [], "worker_api": [], "cleaned": False,
               "cleanup_errors": [], "bucket": bucket,

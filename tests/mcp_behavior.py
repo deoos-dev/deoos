@@ -434,7 +434,7 @@ async def run(args, report):
                 'RustFS test endpoint must be local'
             env.update(AWS_ENDPOINT=endpoint, AWS_ALLOW_HTTP='true', AWS_REGION='us-east-1',
                        AWS_ACCESS_KEY_ID='local-development',
-                       AWS_SECRET_ACCESS_KEY='local-development-only-secret', AWS_BUCKET=bucket)
+                       AWS_SECRET_ACCESS_KEY='local-development-only-secret', DEOOS_STORAGE_BUCKET=bucket)
             s3 = boto3.client('s3', endpoint_url=endpoint, region_name='us-east-1',
                               aws_access_key_id=env['AWS_ACCESS_KEY_ID'],
                               aws_secret_access_key=env['AWS_SECRET_ACCESS_KEY'])

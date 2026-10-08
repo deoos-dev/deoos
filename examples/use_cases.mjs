@@ -173,7 +173,7 @@ function createClient() {
   if (mode === 'library') {
     const provider = process.env.DEOOS_STORAGE_PROVIDER ?? 's3';
     const bucket = process.env.DEOOS_STORAGE_BUCKET ?? (provider === 's3' ? process.env.AWS_BUCKET : undefined);
-    if (!bucket) throw new Error('DEOOS_STORAGE_BUCKET (or AWS_BUCKET for S3) is required');
+    if (!bucket) throw new Error('DEOOS_STORAGE_BUCKET is required');
     return new Client({ bucket, provider, region: provider === 's3' ? process.env.AWS_REGION : undefined,
       prefix: process.env.EXECUTION_PREFIX ?? 'deoos' });
   }
@@ -188,7 +188,7 @@ async function main() {
     console.log('  schedule --id ID [--source ID --pages N --interval-ms N --first-due-ms N]');
     console.log('  work [--once] | signal --id ID [--decline] | inspect --id ID [--schedule]');
     console.log('Set SERVICE_URL for submit/schedule. Use DEOOS_MODE=server with ENGINE_URL,');
-    console.log('or DEOOS_MODE=library with AWS_BUCKET, AWS_REGION, and EXECUTION_PREFIX.');
+    console.log('or DEOOS_MODE=library with DEOOS_STORAGE_BUCKET, AWS_REGION, and EXECUTION_PREFIX.');
     return;
   }
   const { values, positionals } = parseArgs({ options: {

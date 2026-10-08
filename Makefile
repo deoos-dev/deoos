@@ -21,7 +21,7 @@ test-examples: build
 	ENGINE_BINARY="$(CURDIR)/engine/target/release/deoos-server" $(TEST_PYTHON) tests/use_cases.py
 
 test-cluster: build
-	docker compose -p durable-cluster -f compose.cluster.yaml up -d
+	docker compose -p durable-cluster -f tests/compose.cluster.yaml up -d
 	$(TEST_PYTHON) tests/cluster_contract.py
 
 package: build
@@ -38,4 +38,4 @@ test-filesystem: package
 
 clean-local:
 	docker compose down -v
-	docker compose -p durable-cluster -f compose.cluster.yaml down -v
+	docker compose -p durable-cluster -f tests/compose.cluster.yaml down -v

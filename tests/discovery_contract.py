@@ -150,7 +150,7 @@ def main():
                       AWS_SECRET_ACCESS_KEY="local-development-only-secret",
                       AWS_REGION="us-east-1", AWS_DEFAULT_REGION="us-east-1",
                       AWS_ENDPOINT="http://127.0.0.1:19000", AWS_ALLOW_HTTP="true",
-                      AWS_BUCKET=bucket, DEOOS_STORAGE_BUCKET=bucket,
+                      DEOOS_STORAGE_BUCKET=bucket,
                       DEOOS_STORAGE_PROVIDER="s3", LEASE_MS="30000",
                       NO_PROXY="127.0.0.1,localhost", no_proxy="127.0.0.1,localhost")
     proxy = None
@@ -163,7 +163,7 @@ def main():
     created_bucket = False
 
     def client_for(engine_prefix):
-        os.environ.update(AWS_BUCKET=bucket, AWS_ENDPOINT=proxy_url,
+        os.environ.update(DEOOS_STORAGE_BUCKET=bucket, AWS_ENDPOINT=proxy_url,
                           EXECUTION_PREFIX=engine_prefix)
         client = Client(bucket=bucket, prefix=engine_prefix)
         library_clients.append(client)
@@ -172,7 +172,7 @@ def main():
     def server_for(engine_prefix, scratch):
         port = free_port()
         env = os.environ.copy()
-        env.update(AWS_BUCKET=bucket, DEOOS_STORAGE_BUCKET=bucket,
+        env.update(DEOOS_STORAGE_BUCKET=bucket,
                    AWS_ENDPOINT=proxy_url, AWS_REGION="us-east-1",
                    AWS_ALLOW_HTTP="true", DEOOS_STORAGE_PROVIDER="s3",
                    EXECUTION_PREFIX=engine_prefix, ENGINE_BIND=f"127.0.0.1:{port}",

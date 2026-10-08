@@ -44,7 +44,7 @@ function createClient() {
       throw new Error("DEOOS_STORAGE_PROVIDER must be 's3', 'gcs', 'azure', or 'filesystem'");
     }
     const bucket = process.env.DEOOS_STORAGE_BUCKET || (provider === 's3' ? process.env.AWS_BUCKET : undefined);
-    if (!bucket) throw new Error('DEOOS_STORAGE_BUCKET is required in library mode (AWS_BUCKET is an S3 fallback)');
+    if (!bucket) throw new Error('DEOOS_STORAGE_BUCKET is required in library mode');
     return new Client({
       provider, bucket,
       prefix: process.env.EXECUTION_PREFIX ?? 'deoos',
@@ -98,7 +98,7 @@ async function main() {
     console.log('  work [--once]');
     console.log('  approve --id ID [--decline]');
     console.log('  inspect --id ID');
-    console.log('Set DEOOS_MODE=server with ENGINE_URL, or DEOOS_MODE=library with DEOOS_STORAGE_BUCKET and optional DEOOS_STORAGE_PROVIDER (default s3). AWS_BUCKET is an S3 fallback.');
+    console.log('Set DEOOS_MODE=server with ENGINE_URL, or DEOOS_MODE=library with DEOOS_STORAGE_BUCKET and optional DEOOS_STORAGE_PROVIDER (default s3).');
     return;
   }
   const { values, positionals } = parseArgs({

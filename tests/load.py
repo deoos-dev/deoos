@@ -467,7 +467,7 @@ def main():
     for key in list(os.environ):
         if key.startswith("DEOOS_STORAGE_"):
             os.environ.pop(key)
-    os.environ.update(AWS_BUCKET=bucket, DEOOS_STORAGE_PROVIDER="s3")
+    os.environ.update(DEOOS_STORAGE_BUCKET=bucket, DEOOS_STORAGE_PROVIDER="s3")
     try:
         if external:
             if args.backend == "aws":

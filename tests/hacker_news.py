@@ -161,7 +161,7 @@ def verify(database, source, tasks, seeded, baseline=None):
 bucket = 'deoos-hn-' + uuid.uuid4().hex[:20]
 os.environ.update(AWS_ACCESS_KEY_ID='local-development', AWS_SECRET_ACCESS_KEY='local-development-only-secret',
                   AWS_REGION='us-east-1', AWS_ENDPOINT='http://127.0.0.1:19000', AWS_ALLOW_HTTP='true',
-                  AWS_BUCKET=bucket, DEOOS_STORAGE_BUCKET=bucket, DEOOS_STORAGE_PROVIDER='s3', LEASE_MS='2000')
+                  DEOOS_STORAGE_BUCKET=bucket, DEOOS_STORAGE_PROVIDER='s3', LEASE_MS='2000')
 os.environ.pop('AWS_SESSION_TOKEN', None)
 s3 = boto3.client('s3', endpoint_url=os.environ['AWS_ENDPOINT'], region_name='us-east-1')
 report = dict(started=datetime.datetime.now(datetime.timezone.utc).isoformat(), bucket=bucket, cases=[], schedules=[], cleaned=False,

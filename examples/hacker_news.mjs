@@ -106,7 +106,7 @@ export function create_client() {
     ? { provider, directory: process.env.DEOOS_STORAGE_DIRECTORY }
     : { provider, bucket: process.env.DEOOS_STORAGE_BUCKET || (provider === 's3' ? process.env.AWS_BUCKET : undefined) };
   if (provider === 'filesystem' ? !storage.directory : !storage.bucket) {
-    throw new Error('library mode requires DEOOS_STORAGE_DIRECTORY for filesystem, or DEOOS_STORAGE_BUCKET (AWS_BUCKET for S3)');
+    throw new Error('library mode requires DEOOS_STORAGE_DIRECTORY for filesystem, or DEOOS_STORAGE_BUCKET');
   }
   return new Client({ ...storage, prefix: process.env.EXECUTION_PREFIX ?? 'deoos',
     lease_ms: integer(Number(process.env.LEASE_MS ?? '30000'), 'LEASE_MS') });

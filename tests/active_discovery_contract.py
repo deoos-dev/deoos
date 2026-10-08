@@ -63,7 +63,7 @@ def main():
             os.environ.pop(name, None)
     os.environ.update(AWS_ACCESS_KEY_ID="local-development", AWS_SECRET_ACCESS_KEY="local-development-only-secret",
                       AWS_REGION="us-east-1", AWS_DEFAULT_REGION="us-east-1", AWS_ALLOW_HTTP="true",
-                      AWS_BUCKET=bucket, DEOOS_STORAGE_BUCKET=bucket, DEOOS_STORAGE_PROVIDER="s3",
+                      DEOOS_STORAGE_BUCKET=bucket, DEOOS_STORAGE_PROVIDER="s3",
                       LEASE_MS="30000", NO_PROXY="127.0.0.1,localhost", no_proxy="127.0.0.1,localhost")
     s3 = boto3.client("s3", endpoint_url="http://127.0.0.1:19000", region_name="us-east-1",
                       config=Config(proxies={}, max_pool_connections=32, retries={"total_max_attempts": 2}))

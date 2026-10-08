@@ -76,13 +76,13 @@ def run():
             marker=pathlib.Path(scratch)/'effects';ready=pathlib.Path(scratch)/'ready'
             a.req('/tasks',dict(id='recovery',handler='example',inputs=dict(marker=str(marker),ready=str(ready),number=20,pause_seconds=120),max_attempts=5))
             env=dict(os.environ,ENGINE_URL=a.url,PYTHONPATH=str(ROOT/'clients/python'))
-            p=subprocess.Popen([sys.executable,str(ROOT/'examples/python_worker.py')],env=env);procs.append(p)
+            p=subprocess.Popen([sys.executable,str(ROOT/'tests/fixtures/python_worker.py')],env=env);procs.append(p)
             wait(ready.exists);assert 'first' in a.get('recovery')['steps']
             p.kill();p.wait();procs[0].kill();procs[0].wait()
             # Fresh engine processes have no local task database or checkpoint files.
             a=start(17331);time.sleep(6.3)
             env=dict(os.environ,ENGINE_URL=b.url)
-            subprocess.run(['node',str(ROOT/'examples/typescript_worker.mjs')],env=env,check=True,timeout=30)
+            subprocess.run(['node',str(ROOT/'tests/fixtures/typescript_worker.mjs')],env=env,check=True,timeout=30)
             state=a.get('recovery');assert state['status']=='completed' and state['output']=={'number':42},state
             assert marker.read_text()=='first-executed\n'
             results.append('killed Python worker and engine; TypeScript resumed from S3 and skipped committed step')
@@ -90,7 +90,7 @@ def run():
             expect_conflict(lambda:a.req('/tasks',dict(id='definition',handler='raw',inputs={'changed':True},max_attempts=5)))
             t=a.claim();a.mutate(t,'complete',None)
             results.append('task ID rejects changed immutable definition')
-            for language,command in [('python',[sys.executable,str(ROOT/'examples/basic_python.py'),'basic-python']),('typescript',['node',str(ROOT/'examples/basic_typescript.mjs'),'basic-typescript'])]:
+            for language,command in [('python',[sys.executable,str(ROOT/'tests/fixtures/basic_python.py'),'basic-python']),('typescript',['node',str(ROOT/'tests/fixtures/basic_typescript.mjs'),'basic-typescript'])]:
                 completed=subprocess.run(command,env=dict(os.environ,ENGINE_URL=a.url,PYTHONPATH=str(ROOT/'clients/python')),capture_output=True,text=True,check=True,timeout=30)
                 assert a.get('basic-'+language)['output']=={'words':4,'text':'durable tasks survive crashes'}
             results.append('standalone Python and TypeScript basic examples')
@@ -99,7 +99,7 @@ def run():
             long_marker=pathlib.Path(scratch)/'long-effects';long_ready=pathlib.Path(scratch)/'long-ready'
             a.req('/tasks',dict(id='heartbeat',handler='example',inputs=dict(marker=str(long_marker),ready=str(long_ready),number=20,pause_seconds=8),max_attempts=5))
             env=dict(os.environ,ENGINE_URL=a.url,PYTHONPATH=str(ROOT/'clients/python'))
-            subprocess.run([sys.executable,str(ROOT/'examples/python_worker.py')],env=env,check=True,timeout=30)
+            subprocess.run([sys.executable,str(ROOT/'tests/fixtures/python_worker.py')],env=env,check=True,timeout=30)
             assert a.get('heartbeat')['status']=='completed' and a.get('heartbeat')['attempts']==1
             # The TypeScript worker renews during a long asynchronous callback too.
             a.req('/tasks',dict(id='ts-heartbeat',handler='ts-long',inputs={},max_attempts=3))
@@ -111,9 +111,9 @@ def run():
             from external_service import ExternalService
             external=ExternalService();effect_ready=pathlib.Path(scratch)/'effect-ready'
             a.req('/tasks',dict(id='effect',handler='effect',inputs=dict(url=external.url,ready=str(effect_ready)),max_attempts=5))
-            p=subprocess.Popen([sys.executable,str(ROOT/'examples/idempotent_python.py')],env=dict(os.environ,ENGINE_URL=a.url,PYTHONPATH=str(ROOT/'clients/python')));procs.append(p)
+            p=subprocess.Popen([sys.executable,str(ROOT/'tests/fixtures/idempotent_python.py')],env=dict(os.environ,ENGINE_URL=a.url,PYTHONPATH=str(ROOT/'clients/python')));procs.append(p)
             wait(effect_ready.exists);assert not a.get('effect')['steps'];p.kill();p.wait();time.sleep(6.3)
-            subprocess.run(['node',str(ROOT/'examples/idempotent_typescript.mjs')],env=dict(os.environ,ENGINE_URL=b.url),check=True,timeout=30)
+            subprocess.run(['node',str(ROOT/'tests/fixtures/idempotent_typescript.mjs')],env=dict(os.environ,ENGINE_URL=b.url),check=True,timeout=30)
             assert external.requests==2 and external.effects==1
             assert a.get('effect')['status']=='completed'
             results.append('crash after external success before checkpoint: two requests, one effect with stable idempotency key')
@@ -140,7 +140,7 @@ def run():
                     except (OSError,urllib.error.URLError):pass
                 assert 'uncommitted' not in a.get('orphan')['steps']
                 s3=boto3.client('s3',endpoint_url='http://127.0.0.1:19000',region_name='us-east-1')
-                objects=s3.list_objects_v2(Bucket=os.environ['AWS_BUCKET'],Prefix=os.environ['EXECUTION_PREFIX']+'/tasks/orphan/results/')['Contents']
+                objects=s3.list_objects_v2(Bucket=os.environ['DEOOS_STORAGE_BUCKET'],Prefix=os.environ['EXECUTION_PREFIX']+'/tasks/orphan/results/')['Contents']
                 assert len(objects)==1
                 time.sleep(6.3);t=b.claim('fault');assert t['id']=='orphan'
                 b.mutate(t,'steps/uncommitted',{'retried':True});b.mutate(t,'complete',{'ok':True})

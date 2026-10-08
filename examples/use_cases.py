@@ -186,7 +186,7 @@ def create_client():
         bucket = os.environ.get("DEOOS_STORAGE_BUCKET") or (
             os.environ.get("AWS_BUCKET") if provider == "s3" else None)
         if not bucket:
-            raise ValueError("DEOOS_STORAGE_BUCKET (or AWS_BUCKET for S3) is required")
+            raise ValueError("DEOOS_STORAGE_BUCKET is required")
         config = {"bucket": bucket, "provider": provider,
                   "prefix": os.environ.get("EXECUTION_PREFIX", "deoos")}
         if provider == "s3":

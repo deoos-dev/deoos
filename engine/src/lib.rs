@@ -1164,7 +1164,7 @@ impl Engine {
                         Err(error)
                     }
                 })
-                .map_err(|_| "DEOOS_STORAGE_BUCKET (or AWS_BUCKET for S3) required")?
+                .map_err(|_| "DEOOS_STORAGE_BUCKET required")?
         };
         let directory = if provider == "filesystem" {
             std::env::var("DEOOS_STORAGE_DIRECTORY").ok()

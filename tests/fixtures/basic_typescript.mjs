@@ -1,5 +1,5 @@
 import {randomUUID} from 'node:crypto';
-import {Client} from '../clients/typescript/dist/index.js';
+import {Client} from '../../clients/typescript/dist/index.js';
 const client=new Client(process.env.ENGINE_URL);
 const id=process.argv[2]??`demo-${randomUUID()}`;
 await client.submit(id,'summarize',{text:'  Durable tasks survive crashes  '});

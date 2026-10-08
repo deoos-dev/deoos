@@ -19,7 +19,7 @@ else:
     os.environ.update(AWS_ACCESS_KEY_ID='local-development',AWS_SECRET_ACCESS_KEY='local-development-only-secret',AWS_REGION='us-east-1',AWS_ENDPOINT='http://127.0.0.1:19000',AWS_ALLOW_HTTP='true')
     os.environ.pop('AWS_SESSION_TOKEN',None)
     s3=boto3.client('s3',endpoint_url=os.environ['AWS_ENDPOINT'],region_name='us-east-1');identity='local'
-os.environ.update(AWS_BUCKET=bucket,EXECUTION_PREFIX=prefix)
+os.environ.update(DEOOS_STORAGE_BUCKET=bucket,EXECUTION_PREFIX=prefix)
 report=dict(backend=args.backend,bucket=bucket,prefix=prefix,account=identity,started=datetime.datetime.now(datetime.timezone.utc).isoformat(),passed=[],cleaned=False)
 report['engine_binary']=str(ENGINE)
 report['engine_sha256']=hashlib.sha256(ENGINE.read_bytes()).hexdigest()

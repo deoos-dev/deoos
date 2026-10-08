@@ -326,7 +326,7 @@ def main():
         proxy = CountingProxy(args.backend, credentials, omit_list_etags=args.omit_list_etags)
         proxy.start()
         os.environ.update(AWS_ENDPOINT="http://127.0.0.1:19003", AWS_ALLOW_HTTP="true")
-    os.environ.update(AWS_BUCKET=bucket, ENGINE_BIND="127.0.0.1:17371")
+    os.environ.update(DEOOS_STORAGE_BUCKET=bucket, ENGINE_BIND="127.0.0.1:17371")
     os.environ.pop("ENGINE_TOKEN", None)
     os.environ.pop("LEASE_MS", None)
     cases = [(f"tasks-{n}-results-{c}", n, c, 0, False) for n, c in [(0, 0), (100, 0), (1000, 0), (100, 4), (1000, 4)]]
