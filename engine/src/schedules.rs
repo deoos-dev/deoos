@@ -95,12 +95,11 @@ async fn read(e: &Engine, id: &str) -> Result<(Schedule, UpdateVersion), Error> 
     if !valid(id) {
         return Err(bad("invalid schedule id"));
     }
-    let response = e.store.get(&key(e, id)).await.map_err(storage)?;
+    let (meta, bytes) = e.get_bytes(&key(e, id)).await.map_err(storage)?;
     let version = UpdateVersion {
-        e_tag: response.meta.e_tag.clone(),
-        version: response.meta.version.clone(),
+        e_tag: meta.e_tag.clone(),
+        version: meta.version.clone(),
     };
-    let bytes = response.bytes().await.map_err(storage)?;
     let schedule: Schedule = serde_json::from_slice(&bytes).map_err(|_| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -114,24 +113,13 @@ async fn read(e: &Engine, id: &str) -> Result<(Schedule, UpdateVersion), Error> 
 }
 async fn write(e: &Engine, schedule: &Schedule, mode: PutMode) -> Result<(), Error> {
     let payload = Bytes::from(serde_json::to_vec(schedule).unwrap());
-    match e
-        .store
-        .put_opts(
-            &key(e, &schedule.id),
-            payload.into(),
-            PutOptions {
-                mode,
-                ..Default::default()
-            },
-        )
-        .await
-    {
+    match e.put_object(&key(e, &schedule.id), payload, mode).await {
         Ok(_) => Ok(()),
         Err(error) => {
             if local::is_durability_error(&error) {
                 return Err(storage(error));
             }
-            if let Ok((actual, _)) = read(e, &schedule.id).await
+            if let Ok((actual, _)) = read(&e.reconciliation(), &schedule.id).await
                 && actual.revision == schedule.revision
             {
                 return Ok(());
@@ -143,12 +131,7 @@ async fn write(e: &Engine, schedule: &Schedule, mode: PutMode) -> Result<(), Err
 async fn list(e: &Engine) -> Result<Vec<Schedule>, Error> {
     let prefix = Key::from(format!("{}/schedules", e.prefix));
     let expected = format!("{prefix}/");
-    let objects: Vec<_> = e
-        .store
-        .list(Some(&prefix))
-        .try_collect()
-        .await
-        .map_err(storage)?;
+    let objects: Vec<_> = e.list_objects(&prefix).await.map_err(storage)?;
     let mut schedules = Vec::new();
     for object in objects {
         let path = object.location.to_string();
@@ -223,6 +206,7 @@ async fn create(e: &Engine, request: Create) -> Result<Value, Error> {
 }
 async fn control(e: &Engine, id: &str, paused: bool) -> Result<Value, Error> {
     for _ in 0..16 {
+        e.check_budget()?;
         let (mut schedule, version) = read(e, id).await?;
         if schedule.paused == paused {
             return Ok(json!(schedule));
@@ -258,6 +242,7 @@ async fn backfill(e: &Engine, id: &str, request: BackfillRequest) -> Result<Valu
         ));
     }
     for _ in 0..16 {
+        e.check_budget()?;
         let (mut schedule, version) = read(e, id).await?;
         let first = aligned_at_or_after(&schedule, request.start_ms)?;
         if first >= request.end_ms {
@@ -305,6 +290,7 @@ async fn active(e: &Engine, schedule: &Schedule) -> Result<bool, Error> {
 }
 async fn tick_one(e: &Engine, id: &str) -> Result<(), Error> {
     for _ in 0..16 {
+        e.check_budget()?;
         let (mut schedule, version) = read(e, id).await?;
         if let Some(pending) = schedule.pending.clone() {
             let _ = submit(
@@ -404,12 +390,7 @@ async fn tick_one(e: &Engine, id: &str) -> Result<(), Error> {
 pub(super) async fn tick(e: &Engine, handlers: &[String]) -> Result<(), Error> {
     let prefix = Key::from(format!("{}/schedules", e.prefix));
     let expected = format!("{prefix}/");
-    let objects: Vec<_> = e
-        .store
-        .list(Some(&prefix))
-        .try_collect()
-        .await
-        .map_err(storage)?;
+    let objects: Vec<_> = e.list_objects(&prefix).await.map_err(storage)?;
     let candidates: Vec<_> = objects
         .iter()
         .filter_map(|object| {

@@ -131,7 +131,9 @@ export class Client {
    * One polling loop; the application owns signal and client lifecycle.
    * Abort interrupts idle waits and stops new claims after in-flight work finishes.
    * Errors propagate unless onError explicitly returns 'continue'; that decision
-   * waits pollIntervalMs before retrying. taskId identifies a recorded task failure,
+   * waits pollIntervalMs after a recorded task failure. Failures without a taskId
+   * use jittered backoff capped at five seconds, reset after a successful poll.
+   * Abort interrupts either wait. taskId identifies a recorded task failure,
    * not error origin: application or storage errors inside a handler can receive it.
    * Claim, ownership, and terminal mutation failures have no taskId.
    */
@@ -147,11 +149,13 @@ export class Client {
     if(pollIntervalMs>2_147_483_647)throw new Error('pollIntervalMs exceeds the timer limit');
     validStep(workerId);
     if(onError!==undefined&&typeof onError!=='function')throw new Error('onError must be a function');
-    const idle=async()=>{
+    const backoffBase=Math.min(pollIntervalMs,5000);
+    let backoff=backoffBase;
+    const idle=async(delay=pollIntervalMs)=>{
       if(signal.aborted)return;
       await new Promise<void>(resolve=>{
         const finish=()=>{clearTimeout(timer);signal.removeEventListener('abort',finish);resolve();};
-        const timer=setTimeout(finish,pollIntervalMs);
+        const timer=setTimeout(finish,delay);
         signal.addEventListener('abort',finish,{once:true});
         if(signal.aborted)finish();
       });
@@ -160,13 +164,17 @@ export class Client {
       let failedTaskId:string|undefined;
       try{
         const worked=await this.executeOnce(registered,workerId,id=>{failedTaskId=id;});
+        backoff=backoffBase;
         if(!worked)await idle();
       }catch(error){
         if(onError===undefined)throw error;
         const decision=await onError(error,failedTaskId);
         if(decision==='propagate')throw error;
         if(decision!=='continue')throw new Error("onError must return 'continue' or 'propagate'",{cause:error});
-        await idle();
+        if(failedTaskId===undefined){
+          backoff=Math.min(5000,backoff*2);
+          await idle(backoffBase+Math.random()*(backoff-backoffBase));
+        }else await idle();
       }
     }
   }
@@ -175,31 +183,33 @@ export class Client {
     if(!task) return false;
     if(task.version!==3) throw new Error("unsupported engine protocol version");
     const ctx=new Context(this,task);
-    // Recursive timer prevents overlapping renewals and is drained before terminal writes.
+    // Recursive timer prevents overlapping renewals; terminal writes retain renewals.
     let stopped=false, timer:ReturnType<typeof setTimeout>, renewal=Promise.resolve();
-    const heartbeatMs=Math.max(100,(task.expires_at-Date.now())/3);
-    const beat=()=>{ timer=setTimeout(()=>{ renewal=ctx.mutate('renew').then(()=>{if(!stopped) beat();}).catch(e=>{ctx.ownershipError=e;}); },heartbeatMs); };
+    const beat=()=>{ timer=setTimeout(()=>{ renewal=ctx.mutate('renew').then(()=>{if(!stopped) beat();}).catch(e=>{ctx.ownershipError=e;}); },ctx.heartbeatMs); };
     beat();
     const stop=async()=>{stopped=true;clearTimeout(timer);await renewal;};
-    let output:unknown;
-    try { output=await handlers[task.handler](ctx,task.inputs);ctx.checkOwner(); }
-    catch(error) {
-      await stop();
-      if(ctx.isSuspended)return true;
-      if(!ctx.ownershipError){
-        await ctx.mutate('fail',error instanceof ChildFailed?{error:String(error),terminal:true}:String(error));
-        recordedFailure?.(task.id);
+    try{
+      let output:unknown;
+      try { output=await handlers[task.handler](ctx,task.inputs);ctx.checkOwner(); }
+      catch(error) {
+        if(ctx.isSuspended)return true;
+        if(!ctx.ownershipError){
+          await ctx.mutate('fail',error instanceof ChildFailed?{error:String(error),terminal:true}:String(error));
+          recordedFailure?.(task.id);
+        }
+        throw error;
       }
-      throw error;
-    }
-    await stop();ctx.checkOwner();await ctx.mutate('complete',output??null);return true;
+      await ctx.mutate('complete',output??null);return true;
+    }finally{await stop();}
   }
 }
 export class Context {
   private suspended=false;
   get isSuspended(){return this.suspended;}
   ownershipError:unknown;
-  constructor(public client:Client, public task:Task) {}
+  private ownedUntil:number;
+  constructor(public client:Client, public task:Task) {this.ownedUntil=task.expires_at;}
+  get heartbeatMs(){return Math.max(100,(this.ownedUntil-Date.now())/3);}
   checkOwner(){if(this.suspended)throw new Suspended();if(this.ownershipError) throw new Error('ownership renewal failed; stop work',{cause:this.ownershipError});}
   private async currentState(){
     this.checkOwner();
@@ -211,7 +221,30 @@ export class Context {
     return state;
   }
   idempotencyKey(step:string){return `${this.task.id}/${step}`;}
-  mutate(action:string,value:unknown=null){return this.client.request(`/tasks/${this.task.id}/${action}`,{token:this.task.token,operation_id:randomUUID(),value});}
+  async mutate(action:string,value:unknown=null){
+    // Snapshot once: retries must keep both the operation ID and body unchanged.
+    const data=JSON.parse(JSON.stringify({token:this.task.token,operation_id:randomUUID(),value}));
+    // Bound retry starts; never cancel an in-flight write and its reconciliation.
+    const deadline=performance.now()+Math.min(10000,Math.max(0,(this.ownedUntil-Date.now())/2));
+    for(let attempt=0;attempt<3;attempt++){
+      try{
+        const state=await this.client.request(`/tasks/${this.task.id}/${action}`,data);
+        if(action==='renew')this.ownedUntil=Math.max(this.ownedUntil,state.expires_at);
+        return state;
+      }catch(error){
+        const transient=error instanceof EngineError?error.status===503
+          : error instanceof DOMException&&['TimeoutError','AbortError'].includes(error.name)
+            || error instanceof TypeError
+            || error instanceof Error&&'code' in error&&['ECONNRESET','ECONNREFUSED','ETIMEDOUT','EPIPE','ENETUNREACH','EHOSTUNREACH','EAI_AGAIN'].includes(String(error.code));
+        const delay=100+Math.random()*400;
+        const terminal=['suspend','complete','fail'].includes(action);
+        const retryable=terminal||action==='renew'||action.startsWith('definitions/')||action.startsWith('steps/');
+        if(!transient||!retryable||attempt===2||this.ownershipError&&!terminal||performance.now()+delay>=deadline||Date.now()+delay>=this.ownedUntil)throw error;
+        await new Promise(resolve=>setTimeout(resolve,delay));
+        if(performance.now()>=deadline||Date.now()>=this.ownedUntil||this.ownershipError&&!terminal)throw error;
+      }
+    }
+  }
   async log(message:string){
     if(typeof message!=='string'||Buffer.byteLength(message,'utf8')>4096)throw new Error('log message must be a string up to 4096 bytes');
     await this.currentState();await this.mutate('log',message);

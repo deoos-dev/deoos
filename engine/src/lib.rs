@@ -23,6 +23,7 @@ mod active;
 mod discovery;
 mod local;
 mod qualification;
+mod storage_io;
 // Keep a failed filesystem durability barrier distinguishable after API-error
 // conversion, so an outer operation cannot acknowledge it through readback.
 const DURABILITY_FAILURE: StatusCode = StatusCode::INSUFFICIENT_STORAGE;
@@ -34,6 +35,10 @@ pub struct Engine {
     lease_ms: u64,
     discovery: Arc<std::sync::Mutex<discovery::Hints>>,
     active_ready: Arc<tokio::sync::Mutex<bool>>,
+    storage_control: Arc<storage_io::StorageControl>,
+    storage_tracing: tracing::Dispatch,
+    storage_deadline: Option<tokio::time::Instant>,
+    storage_reconciliation_deadline: Option<tokio::time::Instant>,
 }
 #[derive(Clone, Serialize, Deserialize, Debug)]
 #[serde(deny_unknown_fields)]
@@ -217,6 +222,12 @@ fn storage(err: object_store::Error) -> (StatusCode, String) {
         eprintln!("storage: local durability barrier failed");
         return (DURABILITY_FAILURE, "local durability barrier failed; operation outcome uncertain; check disk space, filesystem support and write permissions".into());
     }
+    if matches!(&err, object_store::Error::Generic { store: "DEOOS", .. }) {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "storage deadline exceeded; write outcome uncertain".into(),
+        );
+    }
     match err {
         object_store::Error::NotFound { .. } => (StatusCode::NOT_FOUND, "not found".into()),
         object_store::Error::Precondition { .. } | object_store::Error::AlreadyExists { .. } => {
@@ -244,12 +255,11 @@ impl Engine {
         if !valid(id) {
             return Err(bad("invalid task id"));
         }
-        let r = self.store.get(&self.key(id)).await.map_err(storage)?;
+        let (meta, bytes) = self.get_bytes(&self.key(id)).await.map_err(storage)?;
         let v = UpdateVersion {
-            e_tag: r.meta.e_tag.clone(),
-            version: r.meta.version.clone(),
+            e_tag: meta.e_tag.clone(),
+            version: meta.version.clone(),
         };
-        let bytes = r.bytes().await.map_err(storage)?;
         let t: Task = serde_json::from_slice(&bytes)
             .map_err(|_| conflict("unsupported or invalid stored task"))?;
         t.validate(id)?;
@@ -257,18 +267,7 @@ impl Engine {
     }
     async fn write(&self, t: &Task, mode: PutMode) -> Result<(), (StatusCode, String)> {
         let payload = Bytes::from(serde_json::to_vec(t).unwrap());
-        match self
-            .store
-            .put_opts(
-                &self.key(&t.id),
-                payload.into(),
-                PutOptions {
-                    mode,
-                    ..Default::default()
-                },
-            )
-            .await
-        {
+        match self.put_object(&self.key(&t.id), payload, mode).await {
             Ok(_) => {
                 self.after_state_write(t).await;
                 Ok(())
@@ -278,7 +277,7 @@ impl Engine {
                     return Err(storage(err));
                 }
                 // Reconcile an uncertain response. A revision is unique to this exact proposed write.
-                if let Ok((actual, _)) = self.read(&t.id).await
+                if let Ok((actual, _)) = self.reconciliation().read(&t.id).await
                     && actual.revision == t.revision
                 {
                     self.after_state_write(&actual).await;
@@ -291,12 +290,7 @@ impl Engine {
     async fn tasks(&self) -> Result<Value, (StatusCode, String)> {
         let prefix = Key::from(format!("{}/tasks", self.prefix));
         let expected = format!("{prefix}/");
-        let objects: Vec<_> = self
-            .store
-            .list(Some(&prefix))
-            .try_collect()
-            .await
-            .map_err(storage)?;
+        let objects: Vec<_> = self.list_objects(&prefix).await.map_err(storage)?;
         let mut ids: Vec<_> = objects
             .into_iter()
             .filter_map(|object| {
@@ -333,6 +327,7 @@ impl Engine {
             )
         );
         for _ in 0..16 {
+            self.check_budget()?;
             let (mut task, version) = self.read(id).await?;
             if task.last_retry_operation.as_deref() == Some(&request.operation_id) {
                 return if task.last_retry_fingerprint.as_deref() == Some(&fingerprint) {
@@ -415,12 +410,8 @@ impl Engine {
         }
     }
     async fn payload(&self, key: &str) -> Result<Value, (StatusCode, String)> {
-        let bytes = self
-            .store
-            .get(&Key::parse(key).map_err(|_| conflict("invalid stored payload key"))?)
-            .await
-            .map_err(storage)?
-            .bytes()
+        let (_, bytes) = self
+            .get_bytes(&Key::parse(key).map_err(|_| conflict("invalid stored payload key"))?)
             .await
             .map_err(storage)?;
         serde_json::from_slice(&bytes).map_err(|_| {
@@ -440,6 +431,7 @@ impl Engine {
         ));
         let mut uploaded = false;
         for _ in 0..16 {
+            self.check_budget()?;
             let (mut task, version) = self.read(id).await?;
             if let Some(key) = task.signals.get(name) {
                 return if normalized_json(self.payload(key).await?)
@@ -455,22 +447,11 @@ impl Engine {
             }
             if !uploaded {
                 let data = Bytes::from(serde_json::to_vec(&request.value).unwrap());
-                if let Err(error) = self
-                    .store
-                    .put_opts(
-                        &result_key,
-                        data.into(),
-                        PutOptions {
-                            mode: PutMode::Create,
-                            ..Default::default()
-                        },
-                    )
-                    .await
-                {
+                if let Err(error) = self.put_object(&result_key, data, PutMode::Create).await {
                     if local::is_durability_error(&error) {
                         return Err(storage(error));
                     }
-                    match self.payload(result_key.as_ref()).await {
+                    match self.reconciliation().payload(result_key.as_ref()).await {
                         Ok(existing) => {
                             if normalized_json(existing) != normalized_json(request.value.clone()) {
                                 return Err(conflict(
@@ -512,6 +493,7 @@ impl Engine {
     }
     async fn cancel(&self, id: &str) -> ApiResult<Task> {
         for _ in 0..16 {
+            self.check_budget()?;
             let (mut task, version) = self.read(id).await?;
             if task.status == "cancelled" {
                 return Ok(Json(task));
@@ -557,6 +539,7 @@ impl Engine {
             Sha256::digest(serde_json::to_vec(&operation_request).unwrap())
         );
         for _ in 0..16 {
+            self.check_budget()?;
             let (mut t, v) = self.read(id).await?;
             if action != "define"
                 && t.last_operation == m.operation_id
@@ -638,29 +621,12 @@ impl Engine {
                         m.operation_id
                     ));
                     let data = Bytes::from(serde_json::to_vec(&m.value).unwrap());
-                    match self
-                        .store
-                        .put_opts(
-                            &result_key,
-                            data.into(),
-                            PutOptions {
-                                mode: PutMode::Create,
-                                ..Default::default()
-                            },
-                        )
-                        .await
-                    {
+                    match self.put_object(&result_key, data, PutMode::Create).await {
                         Ok(_) => {}
                         Err(object_store::Error::AlreadyExists { .. })
                         | Err(object_store::Error::Precondition { .. }) => {
-                            let existing = self
-                                .store
-                                .get(&result_key)
-                                .await
-                                .map_err(storage)?
-                                .bytes()
-                                .await
-                                .map_err(storage)?;
+                            let (_, existing) =
+                                self.get_bytes(&result_key).await.map_err(storage)?;
                             let existing_value: Value = serde_json::from_slice(&existing)
                                 .map_err(|_| conflict("invalid existing result"))?;
                             if normalized_json(existing_value) != normalized_json(m.value.clone()) {
@@ -992,12 +958,8 @@ async fn result(
         .steps
         .get(&name)
         .ok_or((StatusCode::NOT_FOUND, "step not committed".into()))?;
-    let bytes = e
-        .store
-        .get(&Key::parse(key).map_err(|_| conflict("invalid stored result key"))?)
-        .await
-        .map_err(storage)?
-        .bytes()
+    let (_, bytes) = e
+        .get_bytes(&Key::parse(key).map_err(|_| conflict("invalid stored result key"))?)
         .await
         .map_err(storage)?;
     Ok(Json(serde_json::from_slice(&bytes).map_err(|_| {
@@ -1022,6 +984,21 @@ pub struct Config {
 }
 impl Engine {
     pub fn from_config(c: Config) -> Result<Self, String> {
+        let lease_ms = c.lease_ms.unwrap_or(30000);
+        if lease_ms < 1000 {
+            return Err("lease_ms must be >= 1000".into());
+        }
+        after_ms(lease_ms).map_err(|(_, message)| message)?;
+        let timeout = format!("{}ms", (lease_ms / 8).min(2000));
+        let retry = object_store::RetryConfig {
+            max_retries: 2,
+            retry_timeout: std::time::Duration::from_millis((lease_ms / 24).min(1000)),
+            backoff: object_store::BackoffConfig {
+                init_backoff: std::time::Duration::from_millis((lease_ms / 32).min(500)),
+                max_backoff: std::time::Duration::from_millis((lease_ms / 16).min(1000)),
+                ..Default::default()
+            },
+        };
         let provider = c
             .provider
             .or_else(|| std::env::var("DEOOS_STORAGE_PROVIDER").ok())
@@ -1052,7 +1029,21 @@ impl Engine {
                 if c.directory.is_some() {
                     return Err("directory requires provider=filesystem".into());
                 }
-                let mut builder = AmazonS3Builder::from_env().with_bucket_name(c.bucket);
+                let mut builder = AmazonS3Builder::from_env()
+                    .with_bucket_name(c.bucket)
+                    .with_retry(retry.clone())
+                    .with_config(
+                        object_store::aws::AmazonS3ConfigKey::Client(
+                            object_store::ClientConfigKey::Timeout,
+                        ),
+                        timeout.clone(),
+                    )
+                    .with_config(
+                        object_store::aws::AmazonS3ConfigKey::Client(
+                            object_store::ClientConfigKey::ConnectTimeout,
+                        ),
+                        timeout.clone(),
+                    );
                 if let Some(v) = c.region {
                     builder = builder.with_region(v);
                 }
@@ -1095,13 +1086,29 @@ impl Engine {
                     }
                     Arc::new(
                         GoogleCloudStorageBuilder::from_env()
+                            .with_retry(retry.clone())
+                            .with_config(object_store::gcp::GoogleConfigKey::Client(object_store::ClientConfigKey::Timeout), timeout.clone())
+                            .with_config(object_store::gcp::GoogleConfigKey::Client(object_store::ClientConfigKey::ConnectTimeout), timeout.clone())
                             .with_bucket_name(c.bucket)
                             .build()
                             .map_err(|_| "invalid GCS configuration; check bucket and native provider credentials")?,
                     )
                 } else {
-                    let mut builder =
-                        MicrosoftAzureBuilder::from_env().with_container_name(c.bucket);
+                    let mut builder = MicrosoftAzureBuilder::from_env()
+                        .with_container_name(c.bucket)
+                        .with_retry(retry.clone())
+                        .with_config(
+                            object_store::azure::AzureConfigKey::Client(
+                                object_store::ClientConfigKey::Timeout,
+                            ),
+                            timeout.clone(),
+                        )
+                        .with_config(
+                            object_store::azure::AzureConfigKey::Client(
+                                object_store::ClientConfigKey::ConnectTimeout,
+                            ),
+                            timeout.clone(),
+                        );
                     if let Some(v) = c.endpoint {
                         builder = builder.with_endpoint(v);
                     }
@@ -1113,11 +1120,6 @@ impl Engine {
             }
             _ => return Err("provider must be s3, gcs, azure or filesystem".into()),
         };
-        let lease_ms = c.lease_ms.unwrap_or(30000);
-        if lease_ms < 1000 {
-            return Err("lease_ms must be >= 1000".into());
-        }
-        after_ms(lease_ms).map_err(|(_, message)| message)?;
         let prefix = c.prefix.unwrap_or("durable-v3".into());
         if prefix.is_empty()
             || prefix
@@ -1129,12 +1131,24 @@ impl Engine {
                 "prefix must be a nonempty namespace without empty or dot components".into(),
             );
         }
+        use tracing_subscriber::prelude::*;
+        let storage_control = Arc::new(storage_io::StorageControl::new(
+            provider != "filesystem",
+            lease_ms,
+        ));
+        let storage_tracing = tracing::Dispatch::new(
+            tracing_subscriber::registry().with(storage_io::RetryLayer(storage_control.clone())),
+        );
         Ok(Self {
             store,
             prefix,
             lease_ms,
             discovery: Arc::new(std::sync::Mutex::new(discovery::Hints::default())),
             active_ready: Arc::new(tokio::sync::Mutex::new(false)),
+            storage_control,
+            storage_tracing,
+            storage_deadline: None,
+            storage_reconciliation_deadline: None,
         })
     }
     pub fn from_env() -> Result<Self, String> {
@@ -1181,6 +1195,103 @@ impl Engine {
         path: &str,
         data: Value,
     ) -> Result<Value, (StatusCode, String)> {
+        use tracing::instrument::WithSubscriber;
+        if method == "GET" && path == "/info" {
+            return Ok(
+                json!({"process_id":std::process::id(),"protocol_version":PROTOCOL_VERSION,"storage":self.storage_control.snapshot()}),
+            );
+        }
+        let parts: Vec<_> = path.trim_start_matches('/').split('/').collect();
+        let renewal =
+            method == "POST" && parts.len() == 3 && parts[0] == "tasks" && parts[2] == "renew";
+        let slots = if renewal {
+            &self.storage_control.renewals
+        } else {
+            &self.storage_control.ordinary
+        };
+        // Discovery polls cannot occupy the four ordinary slots reserved for progress.
+        let _claim = if method == "POST" && path == "/claim" {
+            Some(self.storage_control.claims.try_acquire().map_err(|_| {
+                self.storage_control.issue(
+                    "admission_rejections",
+                    "storage claim admission busy; retry with backoff",
+                );
+                (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "storage claim admission busy; retry with backoff".into(),
+                )
+            })?)
+        } else {
+            None
+        };
+        let permit = match slots.try_acquire() {
+            Ok(permit) => permit,
+            Err(_) => {
+                let queue = if renewal {
+                    &self.storage_control.renewal_waiters
+                } else {
+                    &self.storage_control.ordinary_waiters
+                };
+                let busy = || {
+                    self.storage_control.issue(
+                        "admission_rejections",
+                        if renewal {
+                            "storage renewal admission busy"
+                        } else {
+                            "storage busy; retry with backoff"
+                        },
+                    );
+                    (
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        if renewal {
+                            "storage renewal admission busy"
+                        } else {
+                            "storage busy; retry with backoff"
+                        }
+                        .into(),
+                    )
+                };
+                let _queued = queue.try_acquire().map_err(|_| busy())?;
+                match tokio::time::timeout(
+                    std::time::Duration::from_millis((self.lease_ms / 8).min(500)),
+                    slots.acquire(),
+                )
+                .await
+                {
+                    Ok(Ok(permit)) => permit,
+                    _ => return Err(busy()),
+                }
+            }
+        };
+        let mut engine = self.clone();
+        engine.storage_deadline = Some(
+            tokio::time::Instant::now()
+                + std::time::Duration::from_millis(
+                    (self.lease_ms / if renewal { 3 } else { 2 }).min(7000),
+                ),
+        );
+        engine.storage_reconciliation_deadline = engine
+            .storage_deadline
+            .map(|deadline| deadline + self.storage_control.reconciliation_timeout);
+        let result = engine
+            .dispatch_inner(method, path, data, renewal)
+            .with_subscriber(self.storage_tracing.clone())
+            .await;
+        drop(permit);
+        if let Err((code, message)) = &result
+            && *code == StatusCode::SERVICE_UNAVAILABLE
+        {
+            self.storage_control.health.lock().unwrap()["last_error"] = json!({"at_ms":now(),"message":if renewal {format!("storage renewal failed: {message}")}else{message.clone()}});
+        }
+        result
+    }
+    async fn dispatch_inner(
+        &self,
+        method: &str,
+        path: &str,
+        data: Value,
+        renewal: bool,
+    ) -> Result<Value, (StatusCode, String)> {
         if method == "POST"
             && data.get("protocol_version").and_then(Value::as_u64)
                 != Some(u64::from(PROTOCOL_VERSION))
@@ -1192,7 +1303,7 @@ impl Engine {
                 json!({"process_id":std::process::id(),"protocol_version":PROTOCOL_VERSION}),
             );
         }
-        if method == "POST" {
+        if method == "POST" && !renewal {
             self.ensure_active().await?;
         }
         let decode = |error: serde_json::Error| bad(&error.to_string());

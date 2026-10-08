@@ -69,15 +69,7 @@ impl Engine {
         };
         let bytes = serde_json::to_vec(&intent).unwrap();
         match self
-            .store
-            .put_opts(
-                &key,
-                Bytes::from(bytes.clone()).into(),
-                PutOptions {
-                    mode: PutMode::Create,
-                    ..Default::default()
-                },
-            )
+            .put_object(&key, Bytes::from(bytes.clone()), PutMode::Create)
             .await
         {
             Ok(_) => Ok(()),
@@ -86,15 +78,15 @@ impl Engine {
                 if local::is_durability_error(&error) {
                     return Err(storage(error));
                 }
-                if let Ok(result) = self.store.get(&key).await
-                    && let Ok(actual) = result.bytes().await
+                let reconcile = self.reconciliation();
+                if let Ok((_, actual)) = reconcile.get_bytes(&key).await
                     && actual.as_ref() == bytes.as_slice()
                 {
                     return Ok(());
                 }
                 // Discovery may have committed this active entry and already retired its
                 // marker before readback. The authoritative state is sufficient proof.
-                if let Ok((actual, _)) = self.read(&task.id).await
+                if let Ok((actual, _)) = reconcile.read(&task.id).await
                     && actual.active_entry_id == task.active_entry_id
                 {
                     return Ok(());
@@ -105,7 +97,7 @@ impl Engine {
     }
 
     async fn retire_active(&self, key: &Key) -> Result<(), (StatusCode, String)> {
-        match self.store.delete(key).await {
+        match self.delete_object(key).await {
             Ok(()) | Err(object_store::Error::NotFound { .. }) => Ok(()),
             Err(error) => Err(storage(error)),
         }
@@ -167,13 +159,13 @@ impl Engine {
         {
             return Err(error.clone());
         }
-        let result = match self.store.get(key).await {
+        let (_, bytes) = match self.get_bytes(key).await {
             Ok(result) => result,
             Err(object_store::Error::NotFound { .. }) => return Ok(None),
             Err(error) => return Err(storage(error)),
         };
-        let intent: ActiveIntent = serde_json::from_slice(&result.bytes().await.map_err(storage)?)
-            .map_err(|_| conflict("invalid stored active intent"))?;
+        let intent: ActiveIntent =
+            serde_json::from_slice(&bytes).map_err(|_| conflict("invalid stored active intent"))?;
         intent.task.validate(id)?;
         if intent.version != ACTIVE_VERSION
             || intent.task.terminal()
@@ -186,6 +178,7 @@ impl Engine {
             return Err(conflict("unsupported or invalid stored active intent"));
         }
         for _ in 0..16 {
+            self.check_budget()?;
             let mode = match current {
                 Ok((task, version)) => {
                     if task.active_entry_id == intent.task.active_entry_id {
@@ -226,12 +219,7 @@ impl Engine {
     ) -> Result<Vec<(String, ObjectMeta)>, (StatusCode, String)> {
         let prefix = Key::from(format!("{}/active", self.prefix));
         let expected_prefix = format!("{prefix}/");
-        let objects: Vec<_> = self
-            .store
-            .list(Some(&prefix))
-            .try_collect()
-            .await
-            .map_err(storage)?;
+        let objects: Vec<_> = self.list_objects(&prefix).await.map_err(storage)?;
         let mut candidates = Vec::new();
         for object in objects {
             // S3 LIST uses a raw prefix and can include active-index.json or active-other.
@@ -247,9 +235,9 @@ impl Engine {
     }
 
     async fn active_initialized(&self, sentinel: &Key) -> Result<bool, (StatusCode, String)> {
-        match self.store.get(sentinel).await {
-            Ok(result) => {
-                let actual: Value = serde_json::from_slice(&result.bytes().await.map_err(storage)?)
+        match self.get_bytes(sentinel).await {
+            Ok((_, bytes)) => {
+                let actual: Value = serde_json::from_slice(&bytes)
                     .map_err(|_| conflict("invalid active index sentinel"))?;
                 if actual != json!({"version":ACTIVE_VERSION,"status":"ready"}) {
                     return Err(conflict("unsupported active index sentinel"));
@@ -276,9 +264,7 @@ impl Engine {
         let prefix = Key::from(format!("{}/tasks", self.prefix));
         let expected_prefix = format!("{prefix}/");
         let occupied = self
-            .store
-            .list(Some(&prefix))
-            .try_collect::<Vec<_>>()
+            .list_objects(&prefix)
             .await
             .map_err(storage)?
             .iter()
@@ -297,15 +283,7 @@ impl Engine {
         let bytes =
             serde_json::to_vec(&json!({"version":ACTIVE_VERSION,"status":"ready"})).unwrap();
         match self
-            .store
-            .put_opts(
-                &sentinel,
-                Bytes::from(bytes).into(),
-                PutOptions {
-                    mode: PutMode::Create,
-                    ..Default::default()
-                },
-            )
+            .put_object(&sentinel, Bytes::from(bytes), PutMode::Create)
             .await
         {
             Ok(_) => {}
@@ -314,7 +292,7 @@ impl Engine {
                 if local::is_durability_error(&error) {
                     return Err(storage(error));
                 }
-                if !self.active_initialized(&sentinel).await? {
+                if !self.reconciliation().active_initialized(&sentinel).await? {
                     return Err(storage(error));
                 }
             }

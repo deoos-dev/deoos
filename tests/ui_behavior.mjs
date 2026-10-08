@@ -6,7 +6,7 @@ import {webcrypto} from 'node:crypto';
 
 const html = await readFile(new URL('../engine/src/ui.html', import.meta.url), 'utf8');
 const script = html.match(/<script>([\s\S]*?)<\/script>/)[1];
-function page() {
+function page({storageUnavailable = false} = {}) {
   const elements = new Map();
   const element = () => ({textContent: '', value: '', disabled: false, open: false,
     children: [], append(child) { this.children.push(child); },
@@ -24,8 +24,11 @@ function page() {
     calls.push({path, method: options.method,
       body: options.body && JSON.parse(options.body)});
     const response = value => ({ok: true, json: async () => value});
-    if (path === '/info') return response({protocol_version: 3});
-    if (path === '/tasks') return response({tasks: [], truncated: false});
+    if (path === '/info') return response({protocol_version: 3,
+      storage: {throttled_retries: 4, backoff_seconds: 1}});
+    if (path === '/tasks') return storageUnavailable
+      ? {ok: false, status: 503, text: async () => 'storage unavailable'}
+      : response({tasks: [], truncated: false});
     if (path === '/schedules') return response({schedules: []});
     if (path.endsWith('/view')) return response({...view});
     if (path.endsWith('/history')) return response({history: [{at_ms: 1, event: 'submit'}]});
@@ -66,6 +69,12 @@ assert.equal(cold.$('taskState').textContent.includes('internal-token'), false);
 await cold.expand();
 assert.equal(cold.calls.at(-1).path, '/tasks/hello-001');
 assert.equal(JSON.parse(cold.$('internalState').textContent).token, 'internal-token');
+
+// Storage health must remain visible even when listing tasks fails under load.
+const saturated = page({storageUnavailable: true});
+await saturated.$('connect').onclick();
+assert.equal(JSON.parse(saturated.$('storageHealth').textContent).throttled_retries, 4);
+assert.match(saturated.$('notice').textContent, /503: storage unavailable/);
 
 // A definitive stale-revision rejection must permit a fresh, fenced retry.
 const stale = page();

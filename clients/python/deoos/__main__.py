@@ -18,6 +18,7 @@ def main():
     parser = argparse.ArgumentParser(prog="python -m deoos")
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("list", help="list up to 100 tasks")
+    commands.add_parser("info", help="show engine and storage health without reading storage")
     mcp = commands.add_parser("mcp", help="serve MCP 2025-11-25 over stdio")
     mcp.add_argument("--allow-actions", action="store_true",
                      help="expose task cancel, retry and signal tools")
@@ -55,7 +56,9 @@ def main():
     client = None
     try:
         client = Client.remote(url, token) if url else Client(token=token)
-        if args.command == "list":
+        if args.command == "info":
+            result = client.request("/info")
+        elif args.command == "list":
             result = client.list_tasks()
         elif args.command == "inspect":
             result = client.inspect(args.id) if args.internal else client.view(args.id)

@@ -1,7 +1,10 @@
 """Worker SDK: library mode or an explicit server-mode connection."""
 import hashlib
+import http.client
 import json
 import math
+import random
+import ssl
 import threading
 import time
 import urllib.request
@@ -211,7 +214,9 @@ class Client:
         was successfully recorded. This does not classify the error's origin:
         an error inside a handler may come from application or storage code.
         Claim, ownership, and terminal mutation failures have no task_id.
-        'continue' waits poll_interval seconds before polling.
+        'continue' waits poll_interval after a recorded task failure. Failures
+        without a task_id use jittered backoff capped at five seconds, reset
+        after a successful poll. Shutdown interrupts either wait.
         KeyboardInterrupt and SystemExit always propagate. No signals or
         client lifecycle are managed here.
         """
@@ -232,6 +237,8 @@ class Client:
             raise ValueError("on_error must be callable")
         worker_id = str(uuid.uuid4()) if worker_id is None else worker_id
         _valid_step(worker_id)
+        backoff_base = min(poll_interval, 5.0)
+        backoff = backoff_base
         while not stop_event.is_set():
             failed_task_id = None
 
@@ -249,8 +256,13 @@ class Client:
                     raise
                 if decision != "continue":
                     raise ValueError("on_error must return 'continue' or 'propagate'") from error
-                stop_event.wait(poll_interval)
+                if failed_task_id is None:
+                    backoff = min(5.0, backoff * 2)
+                    stop_event.wait(random.uniform(backoff_base, backoff))
+                else:
+                    stop_event.wait(poll_interval)
             else:
+                backoff = backoff_base
                 if not worked:
                     stop_event.wait(poll_interval)
 
@@ -272,33 +284,36 @@ class Client:
         thread = threading.Thread(target=heartbeat, daemon=True)
         thread.start()
         try:
-            output = handlers[task["handler"]](ctx, task["inputs"])
-            ctx.check_owner()
-        except _Suspended:
-            stop.set(); thread.join()
-            return True
-        except BaseException as error:
-            stop.set(); thread.join()
-            if ctx.suspended:
+            try:
+                output = handlers[task["handler"]](ctx, task["inputs"])
+                ctx.check_owner()
+            except _Suspended:
                 return True
-            if isinstance(error, Exception) and ctx.ownership_error is None:
-                failure = {"error": str(error), "terminal": True} if isinstance(error, ChildFailed) else str(error)
-                ctx.mutate("fail", failure)
-                if recorded_failure is not None:
-                    recorded_failure(task["id"])
-            raise
-        else:
+            except BaseException as error:
+                if ctx.suspended:
+                    return True
+                if isinstance(error, Exception) and ctx.ownership_error is None:
+                    failure = {"error": str(error), "terminal": True} if isinstance(error, ChildFailed) else str(error)
+                    ctx.mutate("fail", failure)
+                    if recorded_failure is not None:
+                        recorded_failure(task["id"])
+                raise
+            else:
+                ctx.mutate("complete", output)
+            return True
+        finally:
             stop.set(); thread.join()
-            ctx.check_owner()
-            ctx.mutate("complete", output)
-        return True
 
 class Context:
     def __init__(self, client, task):
         self.client, self.task = client, task
         self.ownership_error = None
         self.suspended = False
-        self.heartbeat_seconds = max(0.1, (task["expires_at"] - time.time()*1000) / 3000)
+        self.owned_until = task["expires_at"]
+
+    @property
+    def heartbeat_seconds(self):
+        return max(0.1, (self.owned_until - time.time()*1000) / 3000)
 
     def check_owner(self):
         if self.suspended:
@@ -319,8 +334,31 @@ class Context:
         return f'{self.task["id"]}/{step}'
 
     def mutate(self, action, value=None):
-        data = dict(token=self.task["token"], operation_id=str(uuid.uuid4()), value=value)
-        return self.client.request(f'/tasks/{self.task["id"]}/{action}', data)
+        # Snapshot once: retries must keep both the operation ID and body unchanged.
+        data = json.loads(json.dumps(dict(token=self.task["token"],
+                          operation_id=str(uuid.uuid4()), value=value), allow_nan=False))
+        # Bound retry starts; never cancel an in-flight write and its reconciliation.
+        deadline = time.monotonic() + min(10, max(0, (self.owned_until - time.time()*1000) / 2000))
+        for attempt in range(3):
+            try:
+                state = self.client.request(f'/tasks/{self.task["id"]}/{action}', data)
+                if action == "renew":
+                    self.owned_until = max(self.owned_until, state["expires_at"])
+                return state
+            except (EngineError, urllib.error.URLError, TimeoutError, ConnectionError,
+                    http.client.IncompleteRead, ssl.SSLError) as error:
+                transient = not isinstance(error, EngineError) or error.status == 503
+                delay = random.uniform(.1, .5)
+                retryable = action in ("renew", "suspend", "complete", "fail") or action.startswith(("definitions/", "steps/"))
+                if (not transient or not retryable or attempt == 2
+                        or self.ownership_error is not None and action not in ("suspend", "complete", "fail")
+                        or time.monotonic() + delay >= deadline
+                        or time.time()*1000 + delay*1000 >= self.owned_until):
+                    raise
+                time.sleep(delay)
+                if (time.monotonic() >= deadline or time.time()*1000 >= self.owned_until
+                        or self.ownership_error is not None and action not in ("suspend", "complete", "fail")):
+                    raise
 
     def log(self, message):
         if not isinstance(message, str) or len(message.encode("utf-8")) > 4096:
