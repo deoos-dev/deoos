@@ -493,7 +493,7 @@ def main():
     parser.add_argument('--backend', choices=('filesystem', 'rustfs'), default='filesystem')
     parser.add_argument('--faults', action='store_true')
     parser.add_argument('--report', type=pathlib.Path,
-                        default=ROOT.parent / 'outputs/evidence/mcp-behavior.json')
+                        default=ROOT / 'outputs/evidence/mcp-behavior.json')
     args = parser.parse_args()
     args.binary = args.binary.resolve(strict=True)
     report = {'backend': args.backend, 'binary': str(args.binary),

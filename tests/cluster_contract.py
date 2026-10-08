@@ -2,7 +2,7 @@
 """Race conditional writes across four independent RustFS network endpoints."""
 import boto3, concurrent.futures as cf, json, pathlib, time, uuid
 from botocore.exceptions import ClientError
-(pathlib.Path(__file__).resolve().parents[2]/'outputs/evidence').mkdir(parents=True,exist_ok=True)
+(pathlib.Path(__file__).resolve().parents[1]/'outputs/evidence').mkdir(parents=True,exist_ok=True)
 clients=[boto3.client('s3',endpoint_url=f'http://127.0.0.1:{19100+n}',region_name='us-east-1',aws_access_key_id='local-development',aws_secret_access_key='local-development-only-secret') for n in range(1,5)]
 bucket='durable-cluster-test-'+uuid.uuid4().hex[:16]
 report={'backend':'rustfs-four-node','bucket':bucket,'rounds':[],'cleaned':False}
@@ -34,5 +34,5 @@ finally:
         keys=clients[0].list_objects_v2(Bucket=bucket).get('Contents',[])
         if keys:clients[0].delete_objects(Bucket=bucket,Delete={'Objects':[{'Key':o['Key']} for o in keys]})
         clients[0].delete_bucket(Bucket=bucket);report['cleaned']=True
-    path=pathlib.Path(__file__).resolve().parents[2]/'outputs/evidence/rustfs-cluster.json'
+    path=pathlib.Path(__file__).resolve().parents[1]/'outputs/evidence/rustfs-cluster.json'
     path.write_text(json.dumps(report,indent=2)+'\n');print(json.dumps(report,indent=2))

@@ -312,7 +312,7 @@ def main():
     parser.add_argument('--python', default=sys.executable,
                         help='interpreter with the filesystem-capable deoos SDK installed')
     args = parser.parse_args()
-    report_path = ROOT.parent / 'outputs/evidence/local-storage-processes.json'
+    report_path = ROOT / 'outputs/evidence/local-storage-processes.json'
     report_path.parent.mkdir(parents=True, exist_ok=True)
     try:
         report = run_local_storage(args.python, os.environ)

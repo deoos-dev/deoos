@@ -1,3 +1,4 @@
+# Test-only multi-node RustFS setup. Not a production deployment template.
 services:
   node1:
     depends_on:

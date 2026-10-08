@@ -582,8 +582,8 @@ if __name__ == "__main__":
     parser.add_argument("--rate", type=int, default=100)
     parser.add_argument("--lease-ms", type=int, default=30000)
     parser.add_argument("--rustfs-port", type=int, default=19000)
-    parser.add_argument("--engine", default=str(ROOT / "engine/target/release/deoos-engine"))
-    parser.add_argument("--report", default=str(ROOT.parent / "outputs/saturation" / uuid.uuid4().hex))
+    parser.add_argument("--engine", default=str(ROOT / "engine/target/release/deoos-server"))
+    parser.add_argument("--report", default=str(ROOT / "outputs/saturation" / uuid.uuid4().hex))
     args = parser.parse_args()
     if args.worker:
         worker(json.loads(args.worker))

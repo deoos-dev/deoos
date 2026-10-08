@@ -89,10 +89,11 @@ def verify_target(outputs: pathlib.Path, evidence: pathlib.Path, version: str,
     with zipfile.ZipFile(io.BytesIO(wheels[0])) as wheel:
         require(len(wheel.namelist()) == len(set(wheel.namelist())), f"{target}: duplicate wheel entry")
         python = {name: wheel.read(name) for name in wheel.namelist() if not name.endswith("/")}
-    sdk_version = version.split("-", 1)[0]
+    sdk_version = version
+    python_version = re.sub(r"-alpha\.(\d+)$", r"a\1", version)
     metadata = [data.decode() for name, data in python.items() if name.endswith(".dist-info/METADATA")]
     require(len(metadata) == 1 and f"\nName: deoos\n" in metadata[0]
-            and f"\nVersion: {sdk_version}\n" in metadata[0]
+            and f"\nVersion: {python_version}\n" in metadata[0]
             and "License-Expression: Apache-2.0" in metadata[0], f"{target}: wheel metadata mismatch")
     native_path = "deoos/native/" + library_name("deoos_engine", suffix)
     require([name for name in python if name.startswith("deoos/native/")] == [native_path],
@@ -119,7 +120,7 @@ def verify_target(outputs: pathlib.Path, evidence: pathlib.Path, version: str,
             report = json.loads(path.read_text())
             require(report.get("release_hashes") == hashes, "tested payload differs from archive")
             require(report.get("installed_hashes") == installed, "installed SDK/native hashes differ")
-            require(report.get("server_version") == f"deoos-engine {sdk_version}", "server version differs")
+            require(report.get("server_version") == f"deoos-server {sdk_version}", "server version differs")
             require(report.get("cleaned") is True and not report.get("cleanup_errors")
                     and not report.get("error"), "smoke failed or cleanup incomplete")
             expected = {(mode, language) for mode in ("library", "server") for language in ("python", "typescript")}

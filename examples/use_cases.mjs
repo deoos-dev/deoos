@@ -175,7 +175,7 @@ function createClient() {
     const bucket = process.env.DEOOS_STORAGE_BUCKET ?? (provider === 's3' ? process.env.AWS_BUCKET : undefined);
     if (!bucket) throw new Error('DEOOS_STORAGE_BUCKET (or AWS_BUCKET for S3) is required');
     return new Client({ bucket, provider, region: provider === 's3' ? process.env.AWS_REGION : undefined,
-      prefix: process.env.EXECUTION_PREFIX ?? 'durable-v3' });
+      prefix: process.env.EXECUTION_PREFIX ?? 'deoos' });
   }
   throw new Error("DEOOS_MODE must be 'library' or 'server'");
 }

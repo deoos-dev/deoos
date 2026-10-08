@@ -8,6 +8,8 @@ Small, simple, and safe. Write ordinary functions. Completed steps are remembere
 
 Download the package for your platform from [Releases](https://github.com/deoos-dev/deoos/releases). Python 3.10+ and Node 22+ are required for their respective SDKs; no Rust compiler is needed. Choose the archive matching your operating system and CPU. Release notes list the available builds.
 
+The 0.7.0-alpha.1 and 0.7.0-alpha.2 builds are macOS Apple Silicon only. Check each release’s platform list before downloading. The 0.6.0 storage layout is incompatible; start with a fresh state directory or execution prefix.
+
 ```sh
 uv venv --python 3.12 .venv
 source .venv/bin/activate
@@ -20,7 +22,15 @@ Packages are not yet published to registries. Each release includes both SDKs, t
 
 ## Quick start
 
-These examples use library mode. Create a bucket and configure its credentials first. Replace the bucket and region with yours. The [examples](examples/README.md#deployment) show provider configuration.
+For a zero-setup local run, use the Hacker News example on a Mac with Apple Silicon, `uv`, and Docker installed:
+
+```sh
+./examples/hacker-news
+```
+
+It starts local RustFS, runs the demo, stops a worker after 20 items, then resumes after lease recovery and checks the saved DuckDB data. See [the example guide](examples/README.md) for details.
+
+The SDK snippets below use library mode. Create a bucket and configure its credentials first. Replace the bucket and region with yours. The [examples](examples/README.md#deployment) show provider configuration.
 
 ### Python
 
@@ -62,7 +72,7 @@ Run cloud workers near their object store, or self-hosted workers beside RustFS.
 Run `deoos-server` with storage credentials. Workers connect over HTTP/HTTPS and need only the server URL and token:
 
 ```sh
-AWS_BUCKET=my-workflows AWS_REGION=us-east-1 \
+DEOOS_STORAGE_BUCKET=my-workflows AWS_REGION=us-east-1 \
 ENGINE_BIND=127.0.0.1:7331 ENGINE_TOKEN=your-token \
 /path/to/release/bin/deoos-server
 ```
@@ -92,21 +102,19 @@ The workflow APIs are the same in both modes. Use HTTPS through a TLS proxy acro
 python -m deoos inspect greeting-001
 python -m deoos history greeting-001
 python -m deoos inspect greeting-001 --internal
+python -m deoos info
 ```
 
-The CLI uses your storage configuration in library mode, or `ENGINE_URL` and `ENGINE_TOKEN` in server mode. See the [paired Python and TypeScript examples](examples/README.md) for runnable workflows.
+`info` shows engine health. In server mode it reads the running server’s counters; library-mode CLI commands create a fresh engine. Counters belong to each engine instance and reset when it is recreated. The CLI uses your storage configuration in library mode, or `ENGINE_URL` and `ENGINE_TOKEN` in server mode. See the [paired Python and TypeScript examples](examples/README.md) for runnable workflows.
 
 ## Guarantees and limits
 
-Functions restart from the top on recovery; named steps return committed values. External effects can repeat before a checkpoint commits: destinations must enforce `ctx.idempotency_key(name)` / `ctx.idempotencyKey(name)` for effect deduplication. Workers must have synchronized clocks. Lease expiry cannot interrupt application code or an already dispatched network request; a replacement owner's conditional state write prevents the stale owner from committing over it. Keep checkpoint names and handler semantics compatible with active executions. Checkpoint callbacks are sequential within a task; child tasks may execute concurrently. Node CPU work must not block renewal timers.
-
-Stable task IDs deduplicate submissions within an execution prefix. They do not make external APIs exactly-once. A destination must honor the supplied idempotency key.
-
-Storage-layout changes require a fresh state directory or execution prefix; this alpha has no backward compatibility or automatic migration. Keep matching engine and SDK packages together.
-
-No production HA, tenant isolation, garbage collection or application throughput guarantee is claimed.
-
-Keep task state and checkpoint objects while an execution prefix remains writable. Do not apply age-based deletion to live workflow state; stop all writers before retiring a prefix.
+- Recovery restarts a function from the top; committed named steps return their saved results. Effects between checkpoints may repeat, so destinations must enforce `ctx.idempotency_key(name)` / `ctx.idempotencyKey(name)`. Stable task IDs deduplicate submissions only within an execution prefix.
+- Workers need synchronized clocks. Lease expiry cannot stop a running callback or dispatched request; conditional writes prevent an expired owner from committing over a replacement owner.
+- Keep checkpoint names and handler behavior compatible with active executions. Checkpoint callbacks run sequentially per task; child tasks can run concurrently. Node CPU work must leave time for renewal timers.
+- Object-storage requests and retries are bounded per engine, with separate capacity for lease renewals. Overload can return a retryable error; prolonged storage failures can still cause lease expiry. Keep workflow inputs and outputs small; store large datasets separately and pass references.
+- There is no production HA, tenant isolation, garbage collection, or application throughput guarantee. This alpha has no backward compatibility or automatic migration. Keep engine and SDK versions matched.
+- Retain task state and checkpoint objects while an execution prefix is writable. Stop all writers before retiring a prefix; do not delete live workflow state by age.
 
 ## License
 

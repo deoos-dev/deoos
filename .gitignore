@@ -15,3 +15,4 @@ clients/python/deoos/native/*.dll
 *.tgz
 
 .DS_Store
+outputs/

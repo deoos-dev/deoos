@@ -40,9 +40,9 @@ import urllib.parse
 import uuid
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-REPORT = ROOT.parent / "outputs/evidence/use-cases-rustfs.json"
+REPORT = ROOT / "outputs/evidence/use-cases-rustfs.json"
 SERVER = pathlib.Path(os.environ.get(
-    "ENGINE_BINARY", str(ROOT / "engine/target/release/deoos-engine"))).resolve()
+    "ENGINE_BINARY", str(ROOT / "engine/target/release/deoos-server"))).resolve()
 
 
 def storage_environment(backend, bucket):
@@ -899,7 +899,7 @@ def main(backend="rustfs", bucket=None, recovery_under_load=False):
     env, bucket = storage_environment(backend, bucket)
     prefix = env["EXECUTION_PREFIX"]
     suite = "use-cases-recovery-under-load" if recovery_under_load else "use-cases"
-    report_path = ROOT.parent / "outputs/evidence" / f"{suite}-{backend}.json"
+    report_path = ROOT / "outputs/evidence" / f"{suite}-{backend}.json"
     # Native overrides were removed above, so these are the exact defaults chosen
     # by deoos.native.NativeEngine and the TypeScript SDK's createRequire loader.
     python_native_name = {"Darwin": "libdeoos_engine.dylib", "Linux": "libdeoos_engine.so",

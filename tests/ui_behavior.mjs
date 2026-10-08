@@ -18,7 +18,7 @@ function page({storageUnavailable = false} = {}) {
   let revision = 'revision-1', retryResponse = 'success';
   const calls = [];
   const view = {id: 'hello-001', function: 'hello', status: 'failed',
-    inputs: {name: 'Derek'}, output: null, error: 'test failure', attempts: 1,
+    inputs: {name: 'Example User'}, output: null, error: 'test failure', attempts: 1,
     completed_steps: ['greet']};
   const fetch = async (path, options) => {
     calls.push({path, method: options.method,

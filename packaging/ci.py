@@ -10,8 +10,8 @@ import runpy
 import subprocess
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-OUTPUTS = ROOT.parent / 'outputs'
-EVIDENCE = OUTPUTS / 'evidence'
+OUTPUTS = ROOT / 'outputs' / 'release'
+EVIDENCE = ROOT / 'outputs' / 'evidence'
 CONTAINER = 'deoos-ci-build'
 RUST = '1.93.1'
 NODE = '22.23.2'
@@ -51,7 +51,7 @@ def audit(target):
     verify(target)
     assert platform.libc_ver() == ('glibc', '2.28')
     dependencies_allowed = {'libgcc_s.so.1', 'libpthread.so.0', 'libm.so.6', 'libdl.so.2', 'libc.so.6', 'librt.so.1', 'ld-linux-x86-64.so.2', 'ld-linux-aarch64.so.1'}
-    for artifact in ['engine/target/release/deoos-engine', 'engine/target/release/libdeoos_engine.so', 'bindings/node/target/release/libdeoos_node.so']:
+    for artifact in ['engine/target/release/deoos-server', 'engine/target/release/libdeoos_engine.so', 'bindings/node/target/release/libdeoos_node.so']:
         path = ROOT / artifact
         for flag, label in [('-h', 'header'), ('-d', 'dependencies'), ('--version-info', 'versions')]:
             text = run('readelf', flag, str(path), capture=True)

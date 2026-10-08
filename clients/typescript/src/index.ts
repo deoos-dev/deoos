@@ -70,7 +70,7 @@ export class Client {
       } catch(error) {
         throw new Error('Cannot load the DEOOS engine in library mode. Install the prebuilt npm package from the release for your operating system and CPU architecture, using Node 22 or newer. If DEOOS_NODE_LIBRARY is set, check that it points to a compatible addon. To connect in server mode, use Client.remote(url, token).',{cause:error});
       }
-      this.native=new addon.NativeEngine(JSON.stringify({...config,prefix:config.prefix??process.env.EXECUTION_PREFIX??"durable-v3",lease_ms:config.lease_ms??Number(process.env.LEASE_MS??30000)}));
+      this.native=new addon.NativeEngine(JSON.stringify({...config,prefix:config.prefix??process.env.EXECUTION_PREFIX??"deoos",lease_ms:config.lease_ms??Number(process.env.LEASE_MS??30000)}));
     }
   }
   static remote(url:string,token?:string){return new Client(url,token); }

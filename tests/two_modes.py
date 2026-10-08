@@ -1,6 +1,6 @@
 """Acceptance matrix: both real SDK modes, both storage providers, same Rust core."""
 import concurrent.futures as cf,hashlib,http.server,json,os,pathlib,platform,subprocess,sys,tempfile,threading,time,urllib.error,urllib.request,uuid
-(pathlib.Path(__file__).resolve().parents[2]/'outputs/evidence').mkdir(parents=True,exist_ok=True)
+(pathlib.Path(__file__).resolve().parents[1]/'outputs/evidence').mkdir(parents=True,exist_ok=True)
 import boto3
 from botocore.exceptions import ClientError
 ROOT=pathlib.Path(__file__).resolve().parents[1]
@@ -8,7 +8,7 @@ sys.path.insert(0,str(ROOT/'clients/python'))
 from deoos import Client,EngineError
 backend=sys.argv[1]
 report={'backend':backend,'modes':{},'cleaned':False}
-bucket='deoos-engine-test-'+uuid.uuid4().hex[:20]
+bucket='deoos-server-test-'+uuid.uuid4().hex[:20]
 if backend=='aws':
  session=boto3.Session(profile_name=os.environ.get('AWS_PROFILE'),region_name='us-east-1');s3=session.client('s3');creds=session.get_credentials().get_frozen_credentials()
  os.environ.update(AWS_ACCESS_KEY_ID=creds.access_key,AWS_SECRET_ACCESS_KEY=creds.secret_key,AWS_REGION='us-east-1')
@@ -19,7 +19,7 @@ else:
  os.environ.update(AWS_ACCESS_KEY_ID='local-development',AWS_SECRET_ACCESS_KEY='local-development-only-secret',AWS_REGION='us-east-1',AWS_ENDPOINT='http://127.0.0.1:19000',AWS_ALLOW_HTTP='true');os.environ.pop('AWS_SESSION_TOKEN',None)
  s3=boto3.client('s3',endpoint_url=os.environ['AWS_ENDPOINT'],region_name='us-east-1')
 os.environ.update(AWS_BUCKET=bucket,LEASE_MS='6000')
-server_binary=pathlib.Path(os.environ.get('ENGINE_BINARY',str(ROOT/'engine/target/debug'/('deoos-engine.exe' if os.name=='nt' else 'deoos-engine')))).resolve()
+server_binary=pathlib.Path(os.environ.get('ENGINE_BINARY',str(ROOT/'engine/target/debug'/('deoos-server.exe' if os.name=='nt' else 'deoos-server')))).resolve()
 native_name={'Darwin':'libdeoos_engine.dylib','Linux':'libdeoos_engine.so','Windows':'deoos_engine.dll'}[platform.system()]
 report['bucket']=bucket
 report['artifacts']={str(p.relative_to(ROOT)):hashlib.sha256(p.read_bytes()).hexdigest() for p in [server_binary,ROOT/'clients/python/deoos/native'/native_name,ROOT/'clients/typescript/dist/native/deoos_node.node',ROOT/'clients/python/deoos/__init__.py',ROOT/'clients/typescript/dist/index.js']}
@@ -905,4 +905,4 @@ finally:
   except ClientError as error:assert error.response['ResponseMetadata']['HTTPStatusCode']==404
   else:raise AssertionError('test bucket still exists')
   report['cleaned']=True
- (ROOT.parent/'outputs'/'evidence'/f'two-modes-{backend}.json').write_text(json.dumps(report,indent=2)+'\n');print(json.dumps(report,indent=2))
+ (ROOT/'outputs'/'evidence'/f'two-modes-{backend}.json').write_text(json.dumps(report,indent=2)+'\n');print(json.dumps(report,indent=2))

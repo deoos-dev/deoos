@@ -294,7 +294,7 @@ def main():
               "started": datetime.datetime.now(datetime.timezone.utc).isoformat(), "cases": [],
               "cleaned": False,
               "note": "Seeded copies of real completed task templates; discovery and polling use the real SDK/engine. Counted AWS latency includes forwarding overhead and per-request TLS connections; direct mode has no request counters. Infer operational timeout limits from direct mode, not the counting proxy. Server SDK uses its unchanged 10-second request timeout. observations_recorded means every requested sample was written to the report; qualification_complete requires every sample to complete without error."}
-    server_binary = repo / "engine/target/release" / ("deoos-engine.exe" if platform.system() == "Windows" else "deoos-engine")
+    server_binary = repo / "engine/target/release" / ("deoos-server.exe" if platform.system() == "Windows" else "deoos-server")
     native_name = {"Darwin": "libdeoos_engine.dylib", "Linux": "libdeoos_engine.so", "Windows": "deoos_engine.dll"}[platform.system()]
     native = pathlib.Path(os.environ.get("DEOOS_NATIVE_LIBRARY", str(repo / "clients/python/deoos/native" / native_name)))
     files = [server_binary, native, repo / "clients/python/deoos/__init__.py", pathlib.Path(__file__).resolve()]
@@ -514,7 +514,7 @@ def main():
             if args.bucket and not report.get("prefix_owned"):
                 report["cleanup"] = {"cleaned": False, "cleanup_skipped": "namespace ownership not acquired"}
             stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-            output_dir = repo.parent / "outputs/evidence"
+            output_dir = repo / "outputs/evidence"
             output_dir.mkdir(parents=True, exist_ok=True)
             output = output_dir / f"discovery-{args.backend}-{args.mode}-{args.transport}-{args.operation}-{stamp}.json"
             report["observations_recorded"], report["qualification_complete"] = sample_gate(

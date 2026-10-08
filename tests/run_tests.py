@@ -1,13 +1,13 @@
 # Additional real-process/storage behavioral suite; current acceptance is tests/two_modes.py.
 """Provision isolated storage, run contract/lifecycle tests, and clean up."""
 import argparse, concurrent.futures as cf, datetime, hashlib, json, os, pathlib, platform, subprocess, sys, uuid
-(pathlib.Path(__file__).resolve().parents[2]/'outputs/evidence').mkdir(parents=True,exist_ok=True)
+(pathlib.Path(__file__).resolve().parents[1]/'outputs/evidence').mkdir(parents=True,exist_ok=True)
 import boto3
 from botocore.exceptions import ClientError
 from lifecycle import run, ENGINE
 parser=argparse.ArgumentParser();parser.add_argument('backend',choices=['rustfs','aws']);args=parser.parse_args()
 ROOT=pathlib.Path(__file__).resolve().parents[1]
-bucket='deoos-engine-test-'+uuid.uuid4().hex[:20];prefix='proof-'+uuid.uuid4().hex
+bucket='deoos-server-test-'+uuid.uuid4().hex[:20];prefix='proof-'+uuid.uuid4().hex
 if args.backend=='aws':
     session=boto3.Session(profile_name=os.environ.get('AWS_PROFILE'),region_name='us-east-1')
     creds=session.get_credentials().get_frozen_credentials()
@@ -32,7 +32,7 @@ try:
     if args.backend=='aws':
         s3.put_public_access_block(Bucket=bucket,PublicAccessBlockConfiguration={k:True for k in ['BlockPublicAcls','IgnorePublicAcls','BlockPublicPolicy','RestrictPublicBuckets']})
         s3.put_bucket_encryption(Bucket=bucket,ServerSideEncryptionConfiguration={'Rules':[{'ApplyServerSideEncryptionByDefault':{'SSEAlgorithm':'AES256'}}]})
-        s3.put_bucket_tagging(Bucket=bucket,Tagging={'TagSet':[{'Key':'purpose','Value':'deoos-engine-prototype-test'}]})
+        s3.put_bucket_tagging(Bucket=bucket,Tagging={'TagSet':[{'Key':'purpose','Value':'deoos-test'}]})
     def conditional(key,body,**kw):
         try:s3.put_object(Bucket=bucket,Key=key,Body=body,**kw);return True
         except ClientError as e:
@@ -66,5 +66,5 @@ finally:
             else:raise AssertionError('deleted bucket still accessible')
             report['cleaned']=True
         finally:
-            (ROOT.parent/'outputs'/'evidence'/f'{args.backend}.json').write_text(json.dumps(report,indent=2)+'\n')
+            (ROOT/'outputs'/'evidence'/f'{args.backend}.json').write_text(json.dumps(report,indent=2)+'\n')
     print(json.dumps(report,indent=2))

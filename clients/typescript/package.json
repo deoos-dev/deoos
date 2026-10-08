@@ -1,6 +1,6 @@
 {
   "name": "deoos",
-  "version": "0.7.0",
+  "version": "0.7.0-alpha.3",
   "license": "Apache-2.0",
   "homepage": "https://deoos.dev",
   "repository": {"type": "git", "url": "https://github.com/deoos-dev/deoos"},

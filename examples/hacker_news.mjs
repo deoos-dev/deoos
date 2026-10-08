@@ -4,7 +4,7 @@ import { realpathSync } from 'node:fs';
 import { isAbsolute, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { parseArgs } from 'node:util';
-import { Client } from 'deoos';
+import { Client, EngineError } from 'deoos';
 
 export const HANDLER = 'hacker-news.collect.v1';
 const SOURCE = 'https://hacker-news.firebaseio.com/v0';
@@ -108,7 +108,7 @@ export function create_client() {
   if (provider === 'filesystem' ? !storage.directory : !storage.bucket) {
     throw new Error('library mode requires DEOOS_STORAGE_DIRECTORY for filesystem, or DEOOS_STORAGE_BUCKET (AWS_BUCKET for S3)');
   }
-  return new Client({ ...storage, prefix: process.env.EXECUTION_PREFIX ?? 'durable-v3',
+  return new Client({ ...storage, prefix: process.env.EXECUTION_PREFIX ?? 'deoos',
     lease_ms: integer(Number(process.env.LEASE_MS ?? '30000'), 'LEASE_MS') });
 }
 
@@ -172,7 +172,17 @@ async function main() {
     try {
       await client.runWorker(handlers, { signal: stopping.signal, pollIntervalMs: 1000,
         onError: (error, taskId) => {
-          if (taskId === undefined) return 'propagate';
+          if (taskId === undefined) {
+            const transportCodes = ['ECONNRESET', 'ECONNREFUSED', 'ETIMEDOUT', 'EPIPE',
+              'ENETUNREACH', 'EHOSTUNREACH', 'EAI_AGAIN', 'UND_ERR_CONNECT_TIMEOUT',
+              'UND_ERR_HEADERS_TIMEOUT', 'UND_ERR_SOCKET'];
+            const transient = error instanceof EngineError ? error.status === 503
+              : error instanceof DOMException && ['TimeoutError', 'AbortError'].includes(error.name)
+                || error instanceof Error && transportCodes.includes(String(error.code ?? error.cause?.code));
+            if (!transient) return 'propagate';
+            console.error(`Worker polling failed; retrying: ${error?.message ?? String(error)}`);
+            return 'continue';
+          }
           console.error(`Task ${taskId} failed: ${error?.message ?? String(error)}`);
           return 'continue';
         } });

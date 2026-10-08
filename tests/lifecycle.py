@@ -3,7 +3,7 @@
 import concurrent.futures as cf
 import json, os, pathlib, subprocess, sys, tempfile, time, urllib.request, urllib.error, uuid
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-ENGINE = pathlib.Path(os.environ.get('ENGINE_BINARY', str(ROOT / 'engine/target/debug/deoos-engine'))).resolve()
+ENGINE = pathlib.Path(os.environ.get('ENGINE_BINARY', str(ROOT / 'engine/target/debug/deoos-server'))).resolve()
 class API:
     def __init__(self, port): self.url = f'http://127.0.0.1:{port}'
     def req(self, path, data=None):

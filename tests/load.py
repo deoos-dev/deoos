@@ -379,7 +379,7 @@ def run_round(client, mode, worker_count, round_number, history, args, env, work
     errors = [line for log in logs for line in log.read_text(errors="replace").splitlines() if line]
     error_logs = []
     if errors:
-        diagnostic = ROOT.parent / "outputs/evidence" / ("load-worker-errors-" + uuid.uuid4().hex)
+        diagnostic = ROOT / "outputs/evidence" / ("load-worker-errors-" + uuid.uuid4().hex)
         diagnostic.mkdir(parents=True)
         for log in logs:
             if log.stat().st_size:
@@ -431,7 +431,7 @@ def main():
         parser.error("history-tasks must be between 0 and 20000")
     if args.self_test_bucket_contract:
         result = bucket_contract_tests()
-        output = ROOT.parent / "outputs/evidence/load-bucket-contract.json"
+        output = ROOT / "outputs/evidence/load-bucket-contract.json"
         output.parent.mkdir(parents=True, exist_ok=True)
         output.write_text(json.dumps(result, indent=2) + "\n")
         print(json.dumps(result, indent=2))
@@ -441,7 +441,7 @@ def main():
         parser.error("--bucket requires a precreated S3 bucket name")
     if not 1 <= args.tasks <= 1000 or not 1 <= args.duration <= 300 or not .1 <= args.inspect_interval <= 10 or any(not 1 <= count <= 16 for count in args.workers):
         parser.error("tasks1-1000, duration1-300 seconds, inspect-interval0.1-10 seconds, workers1-16 required")
-    server_binary = pathlib.Path(os.environ.get("ENGINE_BINARY", ROOT / "engine/target/release" / ("deoos-engine.exe" if os.name == "nt" else "deoos-engine")))
+    server_binary = pathlib.Path(os.environ.get("ENGINE_BINARY", ROOT / "engine/target/release" / ("deoos-server.exe" if os.name == "nt" else "deoos-server")))
     native_name = {"Darwin": "libdeoos_engine.dylib", "Linux": "libdeoos_engine.so", "Windows": "deoos_engine.dll"}[platform.system()]
     files = [pathlib.Path(__file__), ROOT / "tests/use_cases.py", ROOT / "tests/discovery_probe.py",
              ROOT / "examples/use_cases.py", ROOT / "examples/use_cases.mjs", server_binary,
@@ -577,7 +577,7 @@ def main():
             cleanup_errors.append({"stage": "bucket", "type": type(error).__name__})
         if cleanup_errors:
             report.update(recording_completed=False, cleanup_errors=cleanup_errors)
-        output = ROOT.parent / "outputs/evidence" / ("load-" + datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%S%fZ") + ".json")
+        output = ROOT / "outputs/evidence" / ("load-" + datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%S%fZ") + ".json")
         output.parent.mkdir(parents=True, exist_ok=True)
         output.write_text(json.dumps(report, indent=2) + "\n")
         print(json.dumps({"report": str(output), "cleaned": report["cleaned"]}), flush=True)

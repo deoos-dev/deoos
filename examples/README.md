@@ -4,13 +4,13 @@ These examples use the same workflows in library and server modes, with intercha
 
 ## Hacker News → DuckDB
 
-Requires Mac Apple Silicon, uv, and running Docker. From this repository:
+Requires a Mac with Apple Silicon, `uv`, and Docker installed and running. From this repository:
 
 ```sh
 ./examples/hacker-news
 ```
 
-The launcher starts local RustFS and installs the released SDK and dependencies automatically. The demo collects 100 live Hacker News items, kills the worker after 20 stored items, restarts it, and prints the saved database path.
+The launcher starts local RustFS and installs the released SDK and dependencies automatically. The demo collects 100 live Hacker News items, kills the worker after 20 stored items, waits for lease recovery, resumes it, and verifies the saved database contents.
 
 Open the printed file with `duckdb <database-path>`. No environment configuration is needed.
 
@@ -22,7 +22,7 @@ Open the printed file with `duckdb <database-path>`. No environment configuratio
 | Invoice approval | Persist a wait, stop the worker, then approve or decline | Approval signal followed by an idempotent accounting API call |
 | Scheduled ingestion | Fetch pages as child tasks, join them, publish a batch | Source API and idempotent batch destination |
 
-Pattern references: [idempotent API requests](https://docs.stripe.com/api/idempotent_requests), [signal-based approvals](https://github.com/temporalio/documentation/blob/main/docs/design-patterns/approval.mdx), and [scheduled flows](https://docs.prefect.io/v3/how-to-guides/deployments/create-schedules). The runnable examples use the simulated HTTP adapter described below.
+The runnable examples use the simulated HTTP adapter described below.
 
 The paired programs are `use_cases.py` and `use_cases.mjs`. They use only the DEOOS SDK and language standard libraries. Install the SDK for your platform before running them; keep the JavaScript example inside the Node project where you installed `deoos`.
 
@@ -32,7 +32,7 @@ In cloud deployments, run workers in the relevant cloud near the authoritative o
 
 For R2, use the S3 provider with your account endpoint and region `auto`. GCS and Azure use `DEOOS_STORAGE_PROVIDER=gcs` or `azure` with their native `GOOGLE_*` or `AZURE_*` credentials. Use the same bucket/container and execution prefix across workers.
 
-For library mode, configure `DEOOS_MODE=library`, `DEOOS_STORAGE_BUCKET`, storage credentials and optionally `EXECUTION_PREFIX`. `DEOOS_STORAGE_PROVIDER` selects `s3` (default), `gcs` or `azure`. For S3, configure `AWS_REGION`; `AWS_BUCKET` remains a compatible bucket setting. For local RustFS, also use `AWS_ENDPOINT=http://127.0.0.1:19000` and `AWS_ALLOW_HTTP=true`, with the development credentials in the repository's `compose.yaml`.
+For library mode, configure `DEOOS_MODE=library`, `DEOOS_STORAGE_BUCKET`, storage credentials and optionally `EXECUTION_PREFIX`. `DEOOS_STORAGE_PROVIDER` selects `s3` (default), `gcs` or `azure`. For S3, configure `AWS_REGION`. For local RustFS, also use `AWS_ENDPOINT=http://127.0.0.1:19000` and `AWS_ALLOW_HTTP=true`, with the development credentials in the repository's `compose.yaml`.
 
 For server mode, configure the engine with the storage settings, start `deoos-server`, then set `DEOOS_MODE=server`, `ENGINE_URL` and, if enabled, `ENGINE_TOKEN` on workers. Server-mode workers need no storage credentials.
 

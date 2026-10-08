@@ -1,6 +1,6 @@
 [package]
 name = "deoos-engine"
-version = "0.7.0"
+version = "0.7.0-alpha.3"
 edition = "2024"
 license = "Apache-2.0"
 description = "Durable execution on object storage."
@@ -30,3 +30,7 @@ strip = true
 
 [lib]
 crate-type = ["rlib", "cdylib"]
+
+[[bin]]
+name = "deoos-server"
+path = "src/main.rs"

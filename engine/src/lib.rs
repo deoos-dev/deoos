@@ -1120,7 +1120,7 @@ impl Engine {
             }
             _ => return Err("provider must be s3, gcs, azure or filesystem".into()),
         };
-        let prefix = c.prefix.unwrap_or("durable-v3".into());
+        let prefix = c.prefix.unwrap_or("deoos".into());
         if prefix.is_empty()
             || prefix
                 .split('/')

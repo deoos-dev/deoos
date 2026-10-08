@@ -1,15 +1,20 @@
 """Collect a fixed Hacker News snapshot into a local, queryable DuckDB file."""
 import argparse
+import errno
+import http.client
 import json
 import os
 from pathlib import Path
 import signal
+import socket
+import ssl
 import threading
 import urllib.parse
+import urllib.error
 import urllib.request
 
 import duckdb
-from deoos import Client
+from deoos import Client, EngineError
 
 HANDLER = "hacker-news.collect.v1"
 SOURCE = "https://hacker-news.firebaseio.com/v0"
@@ -95,9 +100,9 @@ def create_client():
     provider = os.environ.get("DEOOS_STORAGE_PROVIDER", "s3")
     if provider == "filesystem":
         return Client(provider=provider, directory=os.environ["DEOOS_STORAGE_DIRECTORY"],
-                      prefix=os.environ.get("EXECUTION_PREFIX", "durable-v3"))
+                      prefix=os.environ.get("EXECUTION_PREFIX", "deoos"))
     return Client(provider=provider, bucket=os.environ.get("DEOOS_STORAGE_BUCKET") or os.environ.get("AWS_BUCKET"),
-                  prefix=os.environ.get("EXECUTION_PREFIX", "durable-v3"))
+                  prefix=os.environ.get("EXECUTION_PREFIX", "deoos"))
 
 
 def query(database):
@@ -151,7 +156,22 @@ def main():
 
             def on_error(error, task_id):
                 if task_id is None:
-                    return "propagate"
+                    reason = error.reason if isinstance(error, urllib.error.URLError) else error
+                    transport_errors = (errno.ECONNREFUSED, errno.ECONNRESET, errno.ECONNABORTED,
+                                        errno.ETIMEDOUT, errno.EPIPE, errno.ENETUNREACH,
+                                        errno.EHOSTUNREACH)
+                    transient = (error.status == 503 if isinstance(error, EngineError)
+                                 else not isinstance(error, urllib.error.HTTPError)
+                                 and not isinstance(reason, ssl.SSLError)
+                                 and (isinstance(reason, (TimeoutError, ConnectionRefusedError,
+                                                          ConnectionResetError, ConnectionAbortedError,
+                                                          BrokenPipeError, http.client.IncompleteRead))
+                                      or isinstance(reason, OSError) and reason.errno in transport_errors
+                                      or isinstance(reason, socket.gaierror) and reason.errno == socket.EAI_AGAIN))
+                    if not transient:
+                        return "propagate"
+                    print(f"Worker polling failed; retrying: {error}", flush=True)
+                    return "continue"
                 print(f"Task {task_id} failed: {error}", flush=True)
                 return "continue"
 

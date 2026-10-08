@@ -41,12 +41,12 @@ def main():
     repo = args.repo.resolve()
     sys.path.insert(0, str(repo / "clients/python"))
     from deoos import Client, EngineError
-    engine = (args.engine or repo / "engine/target/release/deoos-engine").resolve()
+    engine = (args.engine or repo / "engine/target/release/deoos-server").resolve()
     native_name = {"Darwin": "libdeoos_engine.dylib", "Linux": "libdeoos_engine.so", "Windows": "deoos_engine.dll"}[platform.system()]
     native = repo / "clients/python/deoos/native" / native_name
     run_id = uuid.uuid4().hex
     bucket, prefix = "deoos-active-contract-" + run_id[:20], "active-contract-" + run_id
-    evidence = repo.parent / "outputs/active-discovery" / f"active-contract-{run_id}.json"
+    evidence = repo / "outputs/active-discovery" / f"active-contract-{run_id}.json"
     report = {"started": datetime.datetime.now(datetime.timezone.utc).isoformat(), "backend": "local-rustfs-only",
               "bucket": bucket, "owned_prefix": prefix, "checks": [], "history_samples": [], "cleaned": False,
               "cleanup_errors": [],

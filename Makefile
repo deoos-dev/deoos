@@ -11,14 +11,14 @@ setup: build
 
 test-local: build
 	docker compose up -d
-	ENGINE_BINARY="$(CURDIR)/engine/target/release/deoos-engine" $(TEST_PYTHON) tests/two_modes.py rustfs
+	ENGINE_BINARY="$(CURDIR)/engine/target/release/deoos-server" $(TEST_PYTHON) tests/two_modes.py rustfs
 
 test-aws: build
-	ENGINE_BINARY="$(CURDIR)/engine/target/release/deoos-engine" $(TEST_PYTHON) tests/two_modes.py aws
+	ENGINE_BINARY="$(CURDIR)/engine/target/release/deoos-server" $(TEST_PYTHON) tests/two_modes.py aws
 
 test-examples: build
 	docker compose up -d
-	ENGINE_BINARY="$(CURDIR)/engine/target/release/deoos-engine" $(TEST_PYTHON) tests/use_cases.py
+	ENGINE_BINARY="$(CURDIR)/engine/target/release/deoos-server" $(TEST_PYTHON) tests/use_cases.py
 
 test-cluster: build
 	docker compose -p durable-cluster -f compose.cluster.yaml up -d
@@ -34,7 +34,7 @@ test-package:
 test-filesystem: package
 	cargo test --offline --release --manifest-path engine/Cargo.toml --lib
 	$(TEST_PYTHON) tests/package_smoke.py --backend filesystem
-	$(TEST_PYTHON) tests/local_faults.py --binary engine/target/release/deoos-engine --mounts
+	$(TEST_PYTHON) tests/local_faults.py --binary engine/target/release/deoos-server --mounts
 
 clean-local:
 	docker compose down -v

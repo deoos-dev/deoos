@@ -7,7 +7,7 @@ submission and a claim. This proves response and process-recovery behavior. A pe
 barrier for an external writer's newly published version. These are not physical
 power-loss tests.
 
-Usage: python3 tests/local_faults.py --binary engine/target/debug/deoos-engine
+Usage: python3 tests/local_faults.py --binary engine/target/debug/deoos-server
 """
 import argparse
 import concurrent.futures
@@ -485,7 +485,7 @@ def run_mounts(binary, report):
     """Real nested APFS mounts; retain all artifacts unless detach is verified."""
     assert platform.system() == 'Darwin' and platform.machine() == 'arm64'
     binary = pathlib.Path(binary).resolve(strict=True)
-    evidence = ROOT.parent / 'outputs/evidence'
+    evidence = ROOT / 'outputs/evidence'
     evidence.mkdir(parents=True, exist_ok=True)
     # Never use automatic recursive cleanup around a possibly live mount.
     work = pathlib.Path(tempfile.mkdtemp(prefix='deoos-apfs-mounts-', dir=evidence)).resolve()
@@ -692,7 +692,7 @@ def main():
     parser.add_argument('--mounts', action='store_true',
                         help='also qualify real owned nested APFS mounts without sudo')
     parser.add_argument('--report', type=pathlib.Path,
-                        default=ROOT.parent / 'outputs/evidence/local-storage-faults.json')
+                        default=ROOT / 'outputs/evidence/local-storage-faults.json')
     args = parser.parse_args()
     args.report.parent.mkdir(parents=True, exist_ok=True)
     report = {'checks': [], 'cleaned': False}

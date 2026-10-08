@@ -33,7 +33,7 @@ jobs:
           python - <<'PYTHON'
           import os
           from pathlib import Path
-          output = (Path(os.environ['GITHUB_WORKSPACE']).resolve().parent / 'outputs').resolve()
+          output = (Path(os.environ['GITHUB_WORKSPACE']).resolve() / 'outputs').resolve()
           with open(os.environ['GITHUB_ENV'], 'a', encoding='utf-8') as environment:
               environment.write(f'DEOOS_OUTPUTS_DIR={output.as_posix()}\n')
           PYTHON
@@ -61,7 +61,7 @@ jobs:
       - name: Run both SDKs and deployment modes against RustFS
         timeout-minutes: 15
         env:
-          ENGINE_BINARY: ${{ github.workspace }}/engine/target/release/deoos-engine
+          ENGINE_BINARY: ${{ github.workspace }}/engine/target/release/deoos-server
         run: |
           docker compose up -d
           python - <<'PYTHON'
@@ -83,13 +83,13 @@ jobs:
           python tests/discovery_contract.py
           python tests/active_discovery_contract.py
           python packaging/build_package.py --package-only
-          python -m pip install ../outputs/deoos-*/python/*.whl
-          python tests/mcp_behavior.py --binary engine/target/release/deoos-engine --backend rustfs --report ../outputs/evidence/mcp-rustfs.json
+          python -m pip install outputs/release/deoos-*/python/*.whl
+          python tests/mcp_behavior.py --binary engine/target/release/deoos-server --backend rustfs --report outputs/evidence/mcp-rustfs.json
       - name: Capture RustFS logs and remove its volume
         if: always()
         run: |
-          mkdir -p ../outputs/evidence
-          docker compose logs --no-color > ../outputs/evidence/rustfs.log 2>&1
+          mkdir -p outputs/evidence
+          docker compose logs --no-color > outputs/evidence/rustfs.log 2>&1
           docker compose down -v
       - name: Upload behavioral evidence
         if: always()
@@ -149,7 +149,7 @@ jobs:
           python - <<'PYTHON'
           import os
           from pathlib import Path
-          output = (Path(os.environ['GITHUB_WORKSPACE']).resolve().parent / 'outputs').resolve()
+          output = (Path(os.environ['GITHUB_WORKSPACE']).resolve() / 'outputs').resolve()
           with open(os.environ['GITHUB_ENV'], 'a', encoding='utf-8') as environment:
               environment.write(f'DEOOS_OUTPUTS_DIR={output.as_posix()}\n')
           PYTHON
@@ -179,9 +179,9 @@ jobs:
         timeout-minutes: 15
         run: |
           python tests/package_smoke.py --backend filesystem
-          python tests/local_faults.py --binary engine/target/release/deoos-engine --mounts
-          python -m pip install ../outputs/deoos-*/python/*.whl
-          python tests/mcp_behavior.py --binary engine/target/release/deoos-engine --backend filesystem --faults --report ../outputs/evidence/mcp-filesystem.json
+          python tests/local_faults.py --binary engine/target/release/deoos-server --mounts
+          python -m pip install outputs/release/deoos-*/python/*.whl
+          python tests/mcp_behavior.py --binary engine/target/release/deoos-server --backend filesystem --faults --report outputs/evidence/mcp-filesystem.json
       - name: Validate required AWS account configuration
         run: python packaging/ci.py account-config
       - name: Obtain short-lived credentials for the configured test account
@@ -210,8 +210,8 @@ jobs:
         with:
           name: deoos-${{ matrix.target }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
-            ${{ env.DEOOS_OUTPUTS_DIR }}/deoos-*/
-            ${{ env.DEOOS_OUTPUTS_DIR }}/deoos-*.tar.gz
+            ${{ env.DEOOS_OUTPUTS_DIR }}/release/deoos-*/
+            ${{ env.DEOOS_OUTPUTS_DIR }}/release/deoos-*.tar.gz
           if-no-files-found: error
           retention-days: 14
       - name: Upload runtime and ABI evidence

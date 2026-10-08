@@ -114,7 +114,7 @@ def main():
     from discovery_probe import CountingProxy
 
     engine = (args.engine or repo / "engine/target/release" /
-              ("deoos-engine.exe" if os.name == "nt" else "deoos-engine")).resolve()
+              ("deoos-server.exe" if os.name == "nt" else "deoos-server")).resolve()
     native_name = {"Darwin": "libdeoos_engine.dylib", "Linux": "libdeoos_engine.so",
                    "Windows": "deoos_engine.dll"}[platform.system()]
     os.environ.pop("DEOOS_NATIVE_LIBRARY", None)
@@ -126,7 +126,7 @@ def main():
     bucket = "deoos-discovery-contract-" + run_id[:20]
     prefix = "discovery-contract-" + run_id
     neighbor = prefix + "-neighbor/keep"
-    evidence = repo.parent / "outputs/active-discovery" / f"discovery-contract-{run_id}.json"
+    evidence = repo / "outputs/active-discovery" / f"discovery-contract-{run_id}.json"
     report = {"started": datetime.datetime.now(datetime.timezone.utc).isoformat(),
               "backend": "local-rustfs-only", "bucket": bucket, "owned_prefix": prefix,
               "historical_tasks": history_count, "checks": [], "cleaned": False,

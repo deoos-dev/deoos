@@ -37,14 +37,14 @@ def create_client():
         provider = os.environ.get("DEOOS_STORAGE_PROVIDER", "s3")
         if provider == "filesystem":
             return Client(provider=provider, directory=os.environ.get("DEOOS_STORAGE_DIRECTORY"),
-                          prefix=os.environ.get("EXECUTION_PREFIX", "durable-v3"))
+                          prefix=os.environ.get("EXECUTION_PREFIX", "deoos"))
         if provider not in ("s3", "gcs", "azure"):
             raise ValueError("DEOOS_STORAGE_PROVIDER must be 's3', 'gcs', 'azure', or 'filesystem'")
         bucket = os.environ.get("DEOOS_STORAGE_BUCKET") or (
             os.environ.get("AWS_BUCKET") if provider == "s3" else None)
         if not bucket:
             raise ValueError("DEOOS_STORAGE_BUCKET is required in library mode (AWS_BUCKET is an S3 fallback)")
-        return Client(provider=provider, bucket=bucket, prefix=os.environ.get("EXECUTION_PREFIX", "durable-v3"))
+        return Client(provider=provider, bucket=bucket, prefix=os.environ.get("EXECUTION_PREFIX", "deoos"))
     raise ValueError("DEOOS_MODE must be 'library' or 'server'")
 
 

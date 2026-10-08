@@ -725,7 +725,7 @@ def main():
         sys.path.insert(0, str(ROOT / "packaging"))
         from build_package import target
         version = json.loads((ROOT / "clients/typescript/package.json").read_text())["version"]
-        package = ROOT.parent / "outputs" / f"deoos-{version}-{target()[0]}"
+        package = ROOT / "outputs/release" / f"deoos-{version}-{target()[0]}"
     assert package.is_dir(), f"release directory not found: {package}"
     sums = package / "SHA256SUMS"
     release_hashes = {}
@@ -810,7 +810,7 @@ def main():
               "storage_directory": env.get("DEOOS_STORAGE_DIRECTORY") if storage else None,
               "aws_identity": {"account": caller_identity["Account"], "arn": caller_identity["Arn"]}
                               if caller_identity else None}
-    report_path = ROOT.parent / "outputs" / "evidence" / f"package-smoke-{package.name}-{args.backend}.json"
+    report_path = ROOT / "outputs" / "evidence" / f"package-smoke-{package.name}-{args.backend}.json"
     # Persist the exact creation intent so CI can clean a timed-out/cancelled test.
     write_report(report_path, report)
     processes = []

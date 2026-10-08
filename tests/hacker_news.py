@@ -167,7 +167,7 @@ s3 = boto3.client('s3', endpoint_url=os.environ['AWS_ENDPOINT'], region_name='us
 report = dict(started=datetime.datetime.now(datetime.timezone.utc).isoformat(), bucket=bucket, cases=[], schedules=[], cleaned=False,
               source_policy='Each upstream public response captured once; subsequent source requests replay its unchanged bytes.')
 procs, clients, created, source = [], [], False, None
-evidence = ROOT.parent / 'outputs/evidence/hacker-news.json'
+evidence = ROOT / 'outputs/evidence/hacker-news.json'
 evidence.parent.mkdir(parents=True, exist_ok=True)
 try:
     s3.create_bucket(Bucket=bucket); created = True; source = Source()
@@ -204,7 +204,7 @@ try:
                 if mode == 'server':
                     port = free_port(); os.environ.update(ENGINE_URL=f'http://127.0.0.1:{port}', ENGINE_BIND=f'127.0.0.1:{port}')
                     log = scratch / f'{label}-server.log'
-                    binary = os.environ.get('ENGINE_BINARY', str(ROOT / 'engine/target/debug/deoos-engine'))
+                    binary = os.environ.get('ENGINE_BINARY', str(ROOT / 'engine/target/debug/deoos-server'))
                     with log.open('w') as output: server = subprocess.Popen([binary], env=os.environ.copy(), stdout=output, stderr=subprocess.STDOUT)
                     procs.append(server); wait(lambda: urllib.request.urlopen(os.environ['ENGINE_URL'] + '/health', timeout=1).status == 200, process=server, log=log)
                 c = example.create_client(); clients.append(c)

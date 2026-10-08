@@ -15,7 +15,7 @@ import tarfile
 import tempfile
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-OUTPUTS = ROOT.parent / "outputs"
+OUTPUTS = ROOT / "outputs" / "release"
 PYTHON_PACKAGE = ROOT / "clients/python"
 NODE_PACKAGE = ROOT / "clients/typescript"
 TARGETS = {
@@ -138,7 +138,7 @@ def library_name(stem: str, suffix: str) -> str:
 
 def verify_release_architecture(suffix: str, npm_os: str, npm_cpu: str, server: pathlib.Path | None = None) -> tuple[int, int] | None:
     system = {"darwin": "Darwin", "linux": "Linux", "win32": "Windows"}[npm_os]
-    server = server or ROOT / "engine/target/release" / ("deoos-engine.exe" if npm_os == "win32" else "deoos-engine")
+    server = server or ROOT / "engine/target/release" / ("deoos-server.exe" if npm_os == "win32" else "deoos-server")
     artifacts = [server, PYTHON_PACKAGE / "deoos/native" / library_name("deoos_engine", suffix), NODE_PACKAGE / "dist/native/deoos_node.node"]
     minimum = None
     for artifact in artifacts:
@@ -183,14 +183,14 @@ def build(label: str | None = None) -> tuple[str, str, str, str]:
     run("npm", "run", "build", "--prefix", "clients/typescript")
     stage_native_artifacts(label, suffix, explicit_target)
     engine_dir = release_directory(label, explicit_target)
-    verify_release_architecture(suffix, npm_os, npm_cpu, engine_dir / ("deoos-engine.exe" if npm_os == "win32" else "deoos-engine"))
+    verify_release_architecture(suffix, npm_os, npm_cpu, engine_dir / ("deoos-server.exe" if npm_os == "win32" else "deoos-server"))
     return label, suffix, npm_os, npm_cpu
 
 
 def package(label: str, suffix: str, npm_os: str, npm_cpu: str, explicit_target: bool = False) -> pathlib.Path:
     version = json.loads((NODE_PACKAGE / "package.json").read_text())["version"]
     release = OUTPUTS / f"deoos-{version}-{label}"
-    server = release_directory(label, explicit_target) / ("deoos-engine.exe" if npm_os == "win32" else "deoos-engine")
+    server = release_directory(label, explicit_target) / ("deoos-server.exe" if npm_os == "win32" else "deoos-server")
     stage_native_artifacts(label, suffix, explicit_target)
     minimum = verify_release_architecture(suffix, npm_os, npm_cpu, server)
     if release.exists():

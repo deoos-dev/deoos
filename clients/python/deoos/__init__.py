@@ -62,7 +62,7 @@ class Client:
                     os.environ.get("AWS_BUCKET") if provider == "s3" else None)
                 if not config["bucket"]:
                     raise ValueError("bucket or DEOOS_STORAGE_BUCKET is required for library mode")
-            config["prefix"] = prefix or os.environ.get("EXECUTION_PREFIX", "durable-v3")
+            config["prefix"] = prefix or os.environ.get("EXECUTION_PREFIX", "deoos")
             if "lease_ms" not in config and "LEASE_MS" in os.environ:
                 config["lease_ms"] = int(os.environ["LEASE_MS"])
             self.native = NativeEngine(config)
