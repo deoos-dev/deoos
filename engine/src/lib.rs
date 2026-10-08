@@ -615,9 +615,9 @@ impl Engine {
                         return Ok(Json(t));
                     }
                     let result_key = Key::from(format!(
-                        "{}/tasks/{id}/results/{name}/{}/{}.json",
+                        "{}/tasks/{id}/results/{name}/{:x}/{}.json",
                         self.prefix,
-                        format!("{:x}", Sha256::digest(m.token.as_bytes())),
+                        Sha256::digest(m.token.as_bytes()),
                         m.operation_id
                     ));
                     let data = Bytes::from(serde_json::to_vec(&m.value).unwrap());

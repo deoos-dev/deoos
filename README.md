@@ -38,7 +38,16 @@ On other platforms, install the wheel/tgz for your platform as shown above. From
 docker compose -p deoos up -d
 ```
 
-Create a `my-workflows` bucket and configure `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` using the development credentials in `compose.yaml`. Save the Python snippet below as `hello.py`; for local RustFS, add these lines at the top:
+Create the local bucket with the AWS CLI and the development credentials from `compose.yaml`:
+
+```sh
+AWS_ACCESS_KEY_ID=local-development \
+AWS_SECRET_ACCESS_KEY=local-development-only-secret \
+AWS_ENDPOINT_URL=http://127.0.0.1:19000 \
+aws s3api create-bucket --bucket my-workflows --region us-east-1
+```
+
+Configure `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` with those same development credentials for the worker. Save the Python snippet below as `hello.py`; for local RustFS, add these lines at the top:
 
 ```python
 import os

@@ -126,7 +126,6 @@ enum VersionKind {
 struct VersionFile {
     header: Header,
     file: File,
-    directory: PathBuf,
 }
 struct PublishedVersion {
     sequence: u64,
@@ -386,7 +385,6 @@ impl LocalObjectStore {
             .map_err(durability)
     }
     fn read_version(&self, hash: &str) -> Result<(Option<VersionFile>, bool)> {
-        let directory = self.version_dir(hash);
         let Some(entries) = self.version_names(hash)? else {
             return Ok((None, false));
         };
@@ -396,7 +394,7 @@ impl LocalObjectStore {
             .collect();
         let mut observed_incomplete = false;
         while let Some(candidate) = finals.pop() {
-            match self.read_version_file(hash, &directory, &candidate) {
+            match self.read_version_file(hash, &candidate) {
                 Ok(version) => {
                     self.remember_key(hash, &Path::parse(&version.header.key)?);
                     return Ok((Some(version), observed_incomplete));
@@ -410,7 +408,6 @@ impl LocalObjectStore {
     fn read_version_file(
         &self,
         hash: &str,
-        directory: &FsPath,
         name: &VersionName,
     ) -> std::result::Result<VersionFile, VersionReadError> {
         let invalid = |message: &'static str| VersionReadError::Invalid(generic(message));
@@ -489,11 +486,7 @@ impl LocalObjectStore {
         }
         file.seek(SeekFrom::Start(body_offset))
             .map_err(|error| VersionReadError::Invalid(generic(error)))?;
-        Ok(VersionFile {
-            header,
-            file,
-            directory: directory.to_path_buf(),
-        })
+        Ok(VersionFile { header, file })
     }
     fn put_sync(&self, key: Path, payload: PutPayload, opts: PutOptions) -> Result<PutResult> {
         if !opts.attributes.is_empty() {
@@ -763,10 +756,7 @@ impl LocalObjectStore {
             ordinary_sync(&file).map_err(durability)?;
             Ok(file)
         })();
-        let file = match prepared {
-            Ok(file) => file,
-            Err(error) => return Err(error),
-        };
+        let file = prepared?;
         if let Err(error) = fs::rename(&temporary, &final_path) {
             return Err(generic(error));
         }
