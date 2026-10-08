@@ -10,9 +10,9 @@ Requires Mac Apple Silicon, uv, and running Docker. From this repository:
 ./examples/hacker-news
 ```
 
-The launcher starts local RustFS and installs the released SDK and dependencies automatically. The demo collects 100 live Hacker News items, kills the worker after 20 stored items, restarts it, and prints SQL results from DuckDB.
+The launcher starts local RustFS and installs the released SDK and dependencies automatically. The demo collects 100 live Hacker News items, kills the worker after 20 stored items, restarts it, and prints the saved database path.
 
-Query the saved database again with `./examples/hacker-news --query`; this runs offline without Docker. No environment configuration is needed.
+Open the printed file with `duckdb <database-path>`. No environment configuration is needed.
 
 ## Other use cases
 

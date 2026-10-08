@@ -1,6 +1,5 @@
-"""Self-contained local demo: collect, kill after 20 items, resume, query."""
+"""Self-contained local demo: collect, kill after 20 items, resume."""
 import argparse
-import json
 import multiprocessing
 from pathlib import Path
 import time
@@ -11,7 +10,7 @@ import boto3
 import duckdb
 from botocore.exceptions import ClientError
 from deoos import Client
-from hacker_news import HANDLER, HANDLERS, collect, collection_inputs, query
+from hacker_news import HANDLER, HANDLERS, collect, collection_inputs
 
 STORAGE = dict(provider="s3", bucket="hacker-news-workflows", region="us-east-1",
                endpoint="http://127.0.0.1:19000", allow_http=True,
@@ -64,14 +63,9 @@ def worker(prefix, task_id, ready):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--query", action="store_true", help="query the last run without connecting to RustFS")
     parser.add_argument("--directory", type=Path, default=DIRECTORY)
     args = parser.parse_args()
     directory = args.directory.resolve()
-    last_run = directory / "last-run.json"
-    if args.query:
-        print(json.dumps(query(json.loads(last_run.read_text())["database"]), indent=2))
-        return
 
     deadline = time.monotonic() + 60
     while True:
@@ -97,7 +91,6 @@ def main():
     directory.mkdir(parents=True, exist_ok=True)
     task_id = "hn-" + uuid.uuid4().hex[:12]
     database = str(directory / f"{task_id}.duckdb")
-    last_run.write_text(json.dumps(dict(task_id=task_id, database=database)))
     prefix = "hacker-news-demo/" + task_id
     with Client(**STORAGE, prefix=prefix) as client:
         client.submit(task_id, HANDLER, collection_inputs(database), max_attempts=5, retry_ms=200)
@@ -136,7 +129,7 @@ def main():
             assert all(after[identifier] == payload for identifier, payload in saved)
             assert connection.execute("SELECT count(*) FROM collections WHERE task_id=?", [task_id]).fetchone()[0] == 100
         print("Completed: 100 items, no duplicate or overwritten rows.", flush=True)
-    print(json.dumps(query(database), indent=2))
+    print(f'Database: {database}\nOpen it with: duckdb "{database}"')
 
 
 if __name__ == "__main__":

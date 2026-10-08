@@ -14,37 +14,27 @@ if [[ $(uname -s) != Darwin || $(uname -m) != arm64 ]]; then
 fi
 command -v uv >/dev/null || { echo 'Install uv first: https://docs.astral.sh/uv/' >&2; exit 1; }
 
-offline=false
-for arg in "$@"; do
-  [[ $arg != --query ]] || offline=true
-done
-if [[ $offline == false ]]; then
-  command -v docker >/dev/null || { echo 'Install Docker first.' >&2; exit 1; }
-  if ! docker info >/dev/null 2>&1; then
-    if [[ -d /Applications/OrbStack.app ]]; then
-      open -a OrbStack
-    elif [[ -d /Applications/Docker.app ]]; then
-      open -a Docker
-    else
-      echo 'Start Docker, then run this command again.' >&2
-      exit 1
-    fi
-    for ((attempt=0; attempt<60; attempt++)); do
-      docker info >/dev/null 2>&1 && break
-      sleep 1
-    done
-    docker info >/dev/null 2>&1 || { echo 'Docker did not become ready.' >&2; exit 1; }
+command -v docker >/dev/null || { echo 'Install Docker first.' >&2; exit 1; }
+if ! docker info >/dev/null 2>&1; then
+  if [[ -d /Applications/OrbStack.app ]]; then
+    open -a OrbStack
+  elif [[ -d /Applications/Docker.app ]]; then
+    open -a Docker
+  else
+    echo 'Start Docker, then run this command again.' >&2
+    exit 1
   fi
-  docker compose -f "$root/compose.yaml" up -d
+  for ((attempt=0; attempt<60; attempt++)); do
+    docker info >/dev/null 2>&1 && break
+    sleep 1
+  done
+  docker info >/dev/null 2>&1 || { echo 'Docker did not become ready.' >&2; exit 1; }
 fi
+docker compose -f "$root/compose.yaml" up -d
 
 wheels=("$root"/python/*.whl)
 [[ -f ${wheels[0]} ]] || wheels=("$release"/python/*.whl)
 if [[ ! -f ${wheels[0]} ]]; then
-  if [[ $offline == true ]]; then
-    echo 'Run ./examples/hacker-news first to install the SDK and collect data.' >&2
-    exit 1
-  fi
   mkdir -p "$cache"
   echo "Downloading DEOOS $version for Mac Apple Silicon..."
   curl -fL --retry 3 "$url/$archive" -o "$cache/$archive"
@@ -56,8 +46,6 @@ fi
 [[ -f ${wheels[0]} ]] || { echo 'The SDK archive did not contain a Python wheel.' >&2; exit 1; }
 
 unset AWS_SESSION_TOKEN DEOOS_NATIVE_LIBRARY
-uv_args=(run --quiet --no-project --python 3.12)
-[[ $offline == false ]] || uv_args+=(--offline)
-exec uv "${uv_args[@]}" \
+exec uv run --quiet --no-project --python 3.12 \
   --with "${wheels[0]}" --with duckdb==1.5.6 --with boto3==1.42.97 \
   python "$root/examples/hacker_news_demo.py" "$@"
