@@ -4,7 +4,7 @@ use axum::{
     http::StatusCode,
 };
 use bytes::Bytes;
-use futures::TryStreamExt;
+use futures::{StreamExt, TryStreamExt};
 use object_store::{
     ObjectStore, PutMode, PutOptions, UpdateVersion, aws::AmazonS3Builder,
     azure::MicrosoftAzureBuilder, gcp::GoogleCloudStorageBuilder, path::Path as Key,
@@ -303,9 +303,20 @@ impl Engine {
             .collect();
         ids.sort();
         let truncated = ids.len() > 100;
+        // Each extra read lane consumes ordinary admission, preserving the global storage limit.
+        let mut extra_permits = Vec::new();
+        for _ in 0..3 {
+            match self.storage_control.ordinary.try_acquire() {
+                Ok(permit) => extra_permits.push(permit),
+                Err(_) => break,
+            }
+        }
+        let mut reads = futures::stream::iter(ids.into_iter().take(100))
+            .map(|id| async move { self.read(&id).await })
+            .buffered(1 + extra_permits.len());
         let mut tasks = Vec::new();
-        for id in ids.iter().take(100) {
-            match self.read(id).await {
+        while let Some(result) = reads.next().await {
+            match result {
                 Ok((task, _)) => tasks.push(task),
                 Err((StatusCode::NOT_FOUND, _)) => {}
                 Err(error) => return Err(error),
@@ -1266,9 +1277,11 @@ impl Engine {
         let mut engine = self.clone();
         engine.storage_deadline = Some(
             tokio::time::Instant::now()
-                + std::time::Duration::from_millis(
-                    (self.lease_ms / if renewal { 3 } else { 2 }).min(7000),
-                ),
+                + std::time::Duration::from_millis(if method == "GET" && path == "/tasks" {
+                    7000
+                } else {
+                    (self.lease_ms / if renewal { 3 } else { 2 }).min(7000)
+                }),
         );
         engine.storage_reconciliation_deadline = engine
             .storage_deadline

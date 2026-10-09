@@ -885,8 +885,27 @@ c.close()
     assert listing.list_tasks()=={'tasks':[],'truncated':False}
     def seed(index):return listing_clients[index%8].submit('listing-'+str(index).zfill(3),'listing',{})
     with cf.ThreadPoolExecutor(max_workers=8) as pool:list(pool.map(seed,range(101)))
-    listed=listing.list_tasks();assert listed['truncated'] and [task['id'] for task in listed['tasks']]==['listing-'+str(index).zfill(3) for index in range(100)]
-    assert listing.inspect('listing-100')['status']=='queued'
+    list_proxy=None
+    try:
+     if backend=='rustfs':
+      # 100 serial reads would exceed the route budget even on a healthy store.
+      list_proxy=FaultProxy(state_read_delay=.08);list_proxy.start()
+      if mode=='library':
+       listing=Client(bucket=bucket,endpoint='http://127.0.0.1:19002');clients.append(listing)
+      else:
+       server.kill();server.wait()
+       server=subprocess.Popen([str(server_binary)],env=dict(os.environ,AWS_ENDPOINT='http://127.0.0.1:19002'),stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+       for _ in range(100):
+        if server.poll() is not None:raise AssertionError('delayed listing server stopped')
+        try:urllib.request.urlopen(os.environ['ENGINE_URL']+'/health',timeout=1);break
+        except OSError:time.sleep(.1)
+       else:raise AssertionError('delayed listing server unavailable')
+     listed=listing.list_tasks();assert listed['truncated'] and [task['id'] for task in listed['tasks']]==['listing-'+str(index).zfill(3) for index in range(100)]
+     if list_proxy:
+      assert list_proxy.state_reads==100 and 1<list_proxy.peak_state_reads<=4
+     assert listing.inspect('listing-100')['status']=='queued'
+    finally:
+     if list_proxy:list_proxy.close()
     passed.append('listing returns exactly first100 lexicographic IDs and truthful truncation; direct ID lookup reaches omitted tasks')
     report['modes'][mode]={'passed':passed,'success':True}
    finally:

@@ -219,9 +219,16 @@ def worker(config):
     def parent(ctx, inputs):
         for index in range(inputs["nodes"]):
             ctx.spawn(f"child-{index}", "child", {"index": index}, max_attempts=10, retry_ms=200)
+        if config.get("park_checkpoints"):
+            event("checkpoint_cutoff_ready", barrier="parent", task_id=ctx.task["id"])
+            threading.Event().wait()  # Keep the saved parent running until the controller kills it.
         return {"spawned": inputs["nodes"]}
     def child(ctx, inputs):
-        return ctx.step("effect", lambda: effect(ctx.task["id"]))
+        result = ctx.step("effect", lambda: effect(ctx.task["id"]))
+        if config.get("park_checkpoints") and inputs["index"] == config["nodes"] - 1:
+            event("checkpoint_cutoff_ready", barrier="child", task_id=ctx.task["id"])
+            threading.Event().wait()
+        return result
     def canary(ctx, inputs):
         return ctx.step("effect", lambda: effect(ctx.task["id"]))
     def timer(ctx, inputs):
@@ -249,7 +256,7 @@ def worker(config):
         client.run_worker(handlers, stop_event=stop, poll_interval=.1,
                           worker_id=f"worker-{number}", on_error=on_error)
     threads = []
-    for due, target in ((0, 8), (10, 32), (20, 64)):
+    for due, target in config.get("ramp", ((0, 8), (10, 32), (20, 64))):
         time.sleep(max(0, started + due - time.monotonic()))
         event("ramp", workers=target)
         while len(threads) < target:
@@ -277,6 +284,9 @@ def main(args):
     report["harness_sha256"] = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
     report["sdk_sha256"] = hashlib.sha256(Path(sys.modules["deoos"].__file__).read_bytes()).hexdigest()
     report["worker_loop"] = "Actual Python Client.run_worker with 0.1s poll interval and on_error=continue."
+    if args.recovery_seconds:
+        report["cutoff_probe_semantics"] = ("Opt-in: parent parks after final spawn checkpoint; final child parks after effect checkpoint. "
+            "Both retain live heartbeats until hard kill. Original metrics describe this controlled workload only; recovery is separate.")
     s3 = boto3.client("s3", endpoint_url=f"http://127.0.0.1:{args.rustfs_port}",
                       aws_access_key_id="local-development", aws_secret_access_key="local-development-only-secret",
                       region_name="us-east-1", config=Config(retries={"max_attempts": 2}, read_timeout=10,
@@ -333,7 +343,9 @@ def main(args):
         database = evidence / "effects.sqlite"
         with sqlite3.connect(database) as db:
             db.executescript("CREATE TABLE effects(id TEXT PRIMARY KEY); CREATE TABLE invocations(id TEXT, at REAL);")
-        config = dict(url=url, duration=args.duration, events=str(evidence / "workers.jsonl"), effects=str(database))
+        config = dict(url=url, duration=args.duration + (args.recovery_seconds + 10 if args.recovery_seconds else 0),
+                      events=str(evidence / "workers.jsonl"), effects=str(database),
+                      park_checkpoints=bool(args.recovery_seconds), nodes=args.nodes)
         workers_log = open(evidence / "worker-process.log", "w")
         workers = subprocess.Popen([sys.executable, __file__, "--worker", json.dumps(config)],
                                    stdout=workers_log, stderr=subprocess.STDOUT)
@@ -377,10 +389,12 @@ def main(args):
         except Exception as error:
             health_snapshots.append(dict(at=time.time(), error=str(error)))
         report["health_snapshots"] = health_snapshots
-        workers.terminate()
+        workers.kill() if args.recovery_seconds else workers.terminate()
         workers.wait(timeout=5)
-        engine.terminate()
+        engine.kill() if args.recovery_seconds else engine.terminate()
         engine.wait(timeout=5)
+        if args.recovery_seconds:
+            report["cutoff_process_returncodes"] = dict(workers=workers.returncode, engine=engine.returncode)
         # Stop traffic before evidence inventory: these direct reads do not count as workload.
         proxy.close()
         report["requests"] = dict(total=proxy.requests, statuses=dict(proxy.counts),
@@ -498,6 +512,7 @@ def main(args):
         errors = collections.Counter()
         offered = finished = successful = 0
         mutation_operations = collections.Counter()
+        barriers = {}
         with open(evidence / "workers.jsonl") as log:
             for line in log:
                 event = json.loads(line)
@@ -510,6 +525,8 @@ def main(args):
                 elif event["event"] == "rpc_finished":
                     finished += 1
                     successful += event["success"]
+                elif event["event"] == "checkpoint_cutoff_ready":
+                    barriers[event["barrier"]] = event["task_id"]
         report["worker_errors"] = dict(errors)
         report["worker_rpcs"] = dict(offered=offered, finished=finished, successful=successful,
             unfinished_at_stop=offered-finished,
@@ -535,6 +552,64 @@ def main(args):
         with open(evidence / "states.jsonl", "w") as log:
             for state in states:
                 log.write(json.dumps(state)+"\n")
+        if args.recovery_seconds:
+            recovery = report["postload_recovery"] = dict(success=False, budget_seconds=args.recovery_seconds,
+                original_metrics_frozen=True, transport="direct RustFS", workers=8, barriers=barriers)
+            assert report["correctness_verified"], "cutoff correctness checks failed"
+            assert set(barriers) == {"parent", "child"}, "both checkpoint-cutoff barriers must be reached"
+            saved_parent, saved_child = by_id[barriers["parent"]], by_id[barriers["child"]]
+            assert saved_parent["status"] == saved_child["status"] == "running"
+            pointer = saved_child["steps"]["effect"]
+            payload = s3.get_object(Bucket=bucket, Key=pointer)["Body"].read()
+            with sqlite3.connect(database) as db:
+                before_count = db.execute("SELECT COUNT(*) FROM invocations WHERE id=?", (saved_child["id"],)).fetchone()[0]
+            assert before_count == 1
+            recovery_started = time.monotonic()
+            with open(evidence / "recovery-engine.log", "w") as log:
+                engine = subprocess.Popen([args.engine], env=dict(env, AWS_ENDPOINT=f"http://127.0.0.1:{args.rustfs_port}"),
+                                          stdout=log, stderr=subprocess.STDOUT)
+            for _ in range(100):
+                try:
+                    with urllib.request.urlopen(url + "/health", timeout=1):
+                        break
+                except OSError:
+                    assert engine.poll() is None, "recovery engine exited"
+                    time.sleep(.1)
+            else:
+                raise AssertionError("recovery engine did not start")
+            recovery_config = dict(config, park_checkpoints=False, ramp=[[0, 8]],
+                duration=args.recovery_seconds + 10, events=str(evidence / "recovery-workers.jsonl"))
+            with open(evidence / "recovery-worker-process.log", "w") as log:
+                workers = subprocess.Popen([sys.executable, __file__, "--worker", json.dumps(recovery_config)],
+                                           stdout=log, stderr=subprocess.STDOUT)
+            while time.monotonic() - recovery_started < args.recovery_seconds:
+                assert workers.poll() is None and engine.poll() is None, "recovery process exited"
+                recovered_parent, recovered_child = direct(saved_parent["id"]), direct(saved_child["id"])
+                if recovered_parent["status"] == recovered_child["status"] == "completed":
+                    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+                        recovered_states = list(pool.map(direct, [state["id"] for state in children]))
+                    assert time.monotonic() - recovery_started < args.recovery_seconds, "postload recovery inventory exceeded budget"
+                    if len(recovered_states) == args.nodes and all(state["status"] == "completed" for state in recovered_states):
+                        break
+                time.sleep(.2)
+            else:
+                raise AssertionError("postload recovery budget expired")
+            assert recovered_child["steps"]["effect"] == pointer
+            assert s3.get_object(Bucket=bucket, Key=pointer)["Body"].read() == payload
+            assert all(recovered_parent["steps"].get(k) == v for k, v in saved_parent["steps"].items())
+            assert recovered_parent["output"] == {"spawned": args.nodes}
+            assert recovered_parent["attempts"] > saved_parent["attempts"] and recovered_child["attempts"] > saved_child["attempts"]
+            with sqlite3.connect(database) as db:
+                after_count = db.execute("SELECT COUNT(*) FROM invocations WHERE id=?", (saved_child["id"],)).fetchone()[0]
+            assert after_count == before_count == 1, "saved effect callback repeated after hard kill"
+            workers.terminate(); workers.wait(timeout=5)
+            engine.terminate(); engine.wait(timeout=5)
+            assert len(recovered_states) == args.nodes and all(state["status"] == "completed" and state["output"] == state["id"] for state in recovered_states)
+            (evidence / "recovery-states.jsonl").write_text("".join(json.dumps(state)+"\n" for state in [recovered_parent, *recovered_states]))
+            recovery.update(success=True, elapsed_seconds=round(time.monotonic()-recovery_started, 3),
+                child_step_pointer_and_bytes_preserved=True, child_callback_invocations=after_count,
+                parent_checkpoint_pointers_preserved=True, parent_status="completed", requested_children_completed=len(recovered_states),
+                child=recovered_child, parent_attempts=recovered_parent["attempts"])
     except Exception as error:
         report["error"] = dict(type=type(error).__name__, message=str(error))
         raise
@@ -581,6 +656,8 @@ if __name__ == "__main__":
     parser.add_argument("--fault-seconds", type=int, default=30)
     parser.add_argument("--rate", type=int, default=100)
     parser.add_argument("--lease-ms", type=int, default=30000)
+    parser.add_argument("--recovery-seconds", type=int, default=0,
+                        help="opt-in checkpoint barriers, hard cutoff kill, and separate bounded restart recovery (0 disables)")
     parser.add_argument("--rustfs-port", type=int, default=19000)
     parser.add_argument("--engine", default=str(ROOT / "engine/target/release/deoos-server"))
     parser.add_argument("--report", default=str(ROOT / "outputs/saturation" / uuid.uuid4().hex))
@@ -589,6 +666,6 @@ if __name__ == "__main__":
         worker(json.loads(args.worker))
     else:
         if not (1 <= args.nodes <= 10000 and 30 <= args.duration <= 1800 and
-                0 <= args.fault_seconds < args.duration-10 and 1 <= args.rate <= 10000):
+                0 <= args.fault_seconds < args.duration-10 and 1 <= args.rate <= 10000 and 0 <= args.recovery_seconds <= 300):
             parser.error("bounded nodes 1..10000, duration 30..1800, faults < duration-10, rate 1..10000 required")
         main(args)

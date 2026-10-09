@@ -1,8 +1,9 @@
 """Real S3 HTTP traffic fault proxy for the local RustFS backend only."""
-import http.client, http.server, socket, threading
+import http.client, http.server, socket, threading, time
 class FaultProxy:
-    def __init__(self, target_port=19000):
+    def __init__(self, target_port=19000, state_read_delay=0):
         self.ready=threading.Event();self.release=threading.Event();self.lock=threading.Lock();self.mode=None;self.triggered=0
+        self.state_reads=0;self.reads_in_flight=0;self.peak_state_reads=0
         parent=self
         class Handler(http.server.BaseHTTPRequestHandler):
             def log_message(self,*args):pass
@@ -12,6 +13,12 @@ class FaultProxy:
                 conn=http.client.HTTPConnection('127.0.0.1',target_port,timeout=30)
                 conn.request(self.command,self.path,body,headers)
                 response=conn.getresponse();payload=response.read()
+                if state_read_delay and self.command=='GET' and self.path.endswith('/state.json'):
+                    with parent.lock:
+                        parent.state_reads+=1;parent.reads_in_flight+=1
+                        parent.peak_state_reads=max(parent.peak_state_reads,parent.reads_in_flight)
+                    time.sleep(state_read_delay)
+                    with parent.lock:parent.reads_in_flight-=1
                 selected=False
                 with parent.lock:
                     if parent.mode=='lost-state-response' and self.command=='PUT' and self.path.endswith('/state.json') and b'"status":"completed"' in body and response.status==200:
