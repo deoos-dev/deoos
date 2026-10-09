@@ -1,6 +1,6 @@
 # DEOOS use cases
 
-These examples use the same workflows in library and server modes, with interchangeable Python and TypeScript workers. Hacker News uses a real public API; the other examples use a simulated HTTP service.
+These examples demonstrate recovery in library and server mode. Hacker News and DEV articles use real public APIs; the HTTP integrations use a simulated service. The Hacker News and HTTP workflows have interchangeable Python and TypeScript workers; the DEV example uses Python.
 
 ## Hacker News → DuckDB
 
@@ -15,6 +15,22 @@ The launcher starts local RustFS and installs the released SDK and dependencies 
 Open the printed file with `duckdb <database-path>`. No environment configuration is needed.
 
 ## Other use cases
+
+### DEV articles → CSV
+
+Requires Mac Apple Silicon, `uv`, and Docker. Run:
+
+```sh
+./examples/devto-etl
+```
+
+Based on Prefect's [API-sourced ETL example](https://docs.prefect.io/v3/examples/run-api-sourced-etl): fetch three pages of articles, normalize engagement fields, and write `devto_articles.csv`. The workflow is in `devto_etl.py`; it uses Python's standard library and deduplicates overlapping article IDs.
+
+The demo captures three live API responses once and replays those unchanged responses through a counted local HTTP source. In both library and server mode, it kills the worker after page 2 is checkpointed, then after the CSV write before its checkpoint. It verifies each page was fetched once per workflow and both CSVs have identical contents with no duplicate rows. Results stay in `outputs/devto-etl/`; its temporary RustFS bucket is removed. RustFS stays running.
+
+The CSV is local to the worker host. Replacement workers need access to that same destination path; server mode shares workflow state, not files. CSV replacement is idempotent for one workflow owning one output path. Use separate paths for independent runs.
+
+### HTTP integrations
 
 | Use case | Durable behavior | Integration boundary |
 | --- | --- | --- |
