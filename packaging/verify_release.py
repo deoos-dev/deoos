@@ -180,7 +180,7 @@ def verify_target(outputs: pathlib.Path, evidence: pathlib.Path, version: str,
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--version", required=True, help="release archive version, including alpha suffix")
+    parser.add_argument("--version", required=True, help="release archive version")
     parser.add_argument("--source", required=True, help="full source commit common to all builds")
     parser.add_argument("--outputs", type=pathlib.Path, required=True)
     parser.add_argument("--evidence", type=pathlib.Path, required=True)

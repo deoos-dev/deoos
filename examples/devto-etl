@@ -3,7 +3,7 @@ set -euo pipefail
 
 root=$(cd "$(dirname "$0")/.." && pwd)
 cache="$HOME/.cache/deoos/devto-etl"
-version=0.7.0-alpha.3
+version=0.7.1
 archive="deoos-$version-macos-arm64.tar.gz"
 release="$cache/deoos-$version-macos-arm64"
 url="https://github.com/deoos-dev/deoos/releases/download/$version"

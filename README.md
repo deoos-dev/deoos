@@ -8,7 +8,7 @@ Write ordinary functions. Completed steps are remembered; unfinished steps retry
 
 Download the package for your platform from [Releases](https://github.com/deoos-dev/deoos/releases). Python 3.10+ and Node 22+ are required for their respective SDKs; no Rust compiler is needed. Choose the archive matching your operating system and CPU. Release notes list the available builds.
 
-0.7.0-alpha.3 includes packages for macOS (Apple Silicon and Intel), Linux (x86_64 and arm64, glibc 2.28+), and Windows x86_64. The 0.6.0 storage layout is incompatible; start with a fresh state directory or execution prefix.
+0.7.1 includes packages for macOS (Apple Silicon and Intel), Linux (x86_64 and arm64, glibc 2.28+), and Windows x86_64. The 0.6.0 storage layout is incompatible; start with a fresh state directory or execution prefix.
 
 ```sh
 uv venv --python 3.12 .venv
@@ -149,7 +149,7 @@ Keep saved workflow state for the full pause. Try the local fake-payment example
 - Workers need synchronized clocks. Lease expiry cannot stop a running callback or dispatched request; conditional writes prevent an expired owner from committing over a replacement owner.
 - Keep checkpoint names and handler behavior compatible with active executions. Checkpoint callbacks run sequentially per task; child tasks can run concurrently. Node CPU work must leave time for renewal timers.
 - Object-storage requests and retries are bounded per engine, with separate capacity for lease renewals. Overload can return a retryable error; prolonged storage failures can still cause lease expiry. Keep workflow inputs and outputs small; store large datasets separately and pass references.
-- There is no production HA, tenant isolation, garbage collection, or application throughput guarantee. This alpha has no backward compatibility or automatic migration. Keep engine and SDK versions matched.
+- There is no production HA, tenant isolation, garbage collection, or application throughput guarantee. There is no backward compatibility or automatic migration. Keep engine and SDK versions matched.
 - Retain task state and checkpoint objects while an execution prefix is writable. Stop all writers before retiring a prefix; do not delete live workflow state by age.
 
 ## License
