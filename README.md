@@ -134,6 +134,15 @@ python -m deoos info
 
 `info` shows engine health. In server mode it reads the running server’s counters; library-mode CLI commands create a fresh engine. Counters belong to each engine instance and reset when it is recreated. The CLI uses your storage configuration in library mode, or `ENGINE_URL` and `ENGINE_TOKEN` in server mode. See the [paired Python and TypeScript examples](examples/README.md) for runnable workflows.
 
+## Idempotency across long pauses
+
+Completed steps are remembered in your bucket, so replay returns their saved results without calling the API again.
+Inside a step, pass `ctx.idempotency_key("charge")` / `ctx.idempotencyKey("charge")` to the external API.
+That key stays the same across retries and resumes and covers the gap between the call and its committed result, while the provider retains the key.
+After the provider's key window expires, an unfinished step in that gap needs a reconciliation check before calling again.
+Use globally unique execution IDs when sharing an external account; step keys do not include the bucket or prefix.
+Keep saved workflow state for the full pause. Try the local fake-payment example with `./examples/payment-resume`.
+
 ## Guarantees and limits
 
 - Recovery restarts a function from the top; committed named steps return their saved results. Effects between checkpoints may repeat, so destinations must enforce `ctx.idempotency_key(name)` / `ctx.idempotencyKey(name)`. Stable task IDs deduplicate submissions only within an execution prefix.

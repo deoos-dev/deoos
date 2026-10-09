@@ -80,6 +80,7 @@ jobs:
           PYTHON
           python tests/two_modes.py rustfs
           python tests/use_cases.py
+          python tests/payment_resume.py
           python tests/discovery_contract.py
           python tests/active_discovery_contract.py
           python packaging/build_package.py --package-only

@@ -19,6 +19,7 @@ test-aws: build
 test-examples: build
 	docker compose up -d
 	ENGINE_BINARY="$(CURDIR)/engine/target/release/deoos-server" $(TEST_PYTHON) tests/use_cases.py
+	ENGINE_BINARY="$(CURDIR)/engine/target/release/deoos-server" $(TEST_PYTHON) tests/payment_resume.py
 
 test-cluster: build
 	docker compose -p durable-cluster -f tests/compose.cluster.yaml up -d

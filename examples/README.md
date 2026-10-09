@@ -30,7 +30,15 @@ The demo captures three live API responses once and replays those unchanged resp
 
 The CSV is local to the worker host. Replacement workers need access to that same destination path; server mode shares workflow state, not files. CSV replacement is idempotent for one workflow owning one output path. Use separate paths for independent runs.
 
-### HTTP integrations
+### Payment → approval → fulfil
+
+Run `./examples/payment-resume` on Mac Apple Silicon with `uv` and Docker installed. No payment account or API keys are needed. The Python workflow is `payment_resume.py`; `payment_resume.mjs` provides the same TypeScript workflow.
+
+The fake API retains idempotency keys for a configurable window (24 hours by default). The demo advances its virtual clock instantly, kills the worker after the charge checkpoint, and resumes beyond that window: the charge is not called again. A second execution crashes after the call but before its checkpoint and retries within the window with the same key, producing one charge. Both cases run in library and server mode, wait for an approval signal, and verify one fulfilment. Evidence stays in `outputs/payment-resume/`; the temporary workflow bucket is removed. RustFS stays running.
+
+An uncommitted charge resumed after key expiry requires checking the payment provider's transaction records before sending another charge. This example demonstrates saved-result replay and retries within the key window; it does not implement that reconciliation.
+
+### Other HTTP integrations
 
 | Use case | Durable behavior | Integration boundary |
 | --- | --- | --- |

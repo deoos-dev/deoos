@@ -1,0 +1,54 @@
+#!/bin/bash
+set -euo pipefail
+
+root=$(cd "$(dirname "$0")/.." && pwd)
+cache="$HOME/.cache/deoos/payment-resume"
+version=0.7.0-alpha.3
+archive="deoos-$version-macos-arm64.tar.gz"
+release="$cache/deoos-$version-macos-arm64"
+url="https://github.com/deoos-dev/deoos/releases/download/$version"
+
+if [[ $(uname -s) != Darwin || $(uname -m) != arm64 ]]; then
+  echo 'This demo currently requires Mac Apple Silicon.' >&2
+  exit 1
+fi
+command -v uv >/dev/null || { echo 'Install uv first: https://docs.astral.sh/uv/' >&2; exit 1; }
+
+command -v docker >/dev/null || { echo 'Install Docker first.' >&2; exit 1; }
+if ! docker info >/dev/null 2>&1; then
+  if [[ -d /Applications/OrbStack.app ]]; then
+    open -a OrbStack
+  elif [[ -d /Applications/Docker.app ]]; then
+    open -a Docker
+  else
+    echo 'Start Docker, then run this command again.' >&2
+    exit 1
+  fi
+  for ((attempt=0; attempt<60; attempt++)); do
+    docker info >/dev/null 2>&1 && break
+    sleep 1
+  done
+  docker info >/dev/null 2>&1 || { echo 'Docker did not become ready.' >&2; exit 1; }
+fi
+docker compose -p deoos -f "$root/compose.yaml" up -d
+
+wheels=("$root"/python/*.whl)
+[[ -f ${wheels[0]} ]] || wheels=("$release"/python/*.whl)
+if [[ ! -f ${wheels[0]} ]]; then
+  mkdir -p "$cache"
+  echo "Downloading DEOOS $version for Mac Apple Silicon..."
+  curl -fL --retry 3 "$url/$archive" -o "$cache/$archive"
+  curl -fsSL --retry 3 "$url/SHA256SUMS" -o "$cache/SHA256SUMS"
+  (cd "$cache" && awk -v name="$archive" '$2 == name { print; found=1 } END { if (!found) exit 1 }' SHA256SUMS | shasum -a 256 -c -)
+  tar -xzf "$cache/$archive" -C "$cache"
+  wheels=("$release"/python/*.whl)
+fi
+[[ -f ${wheels[0]} ]] || { echo 'The SDK archive did not contain a Python wheel.' >&2; exit 1; }
+server="$release/bin/deoos-server"
+[[ -f "$root/bin/deoos-server" ]] && server="$root/bin/deoos-server"
+[[ -x "$server" ]] || { echo 'The SDK archive did not contain deoos-server.' >&2; exit 1; }
+
+unset AWS_SESSION_TOKEN DEOOS_NATIVE_LIBRARY
+exec uv run --quiet --no-project --python 3.12 \
+  --with "${wheels[0]}" --with boto3==1.42.97 \
+  python "$root/examples/payment_resume_demo.py" --server "$server" "$@"
