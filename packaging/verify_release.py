@@ -74,7 +74,10 @@ def verify_target(outputs: pathlib.Path, evidence: pathlib.Path, version: str,
     require(sums == hashes, f"{target}: incomplete or incorrect payload checksums")
     for path in ("LICENSE", "README.md",
                  "examples/README.md", "examples/library_python.py", "examples/library_typescript.mjs",
-                 "examples/server_python.py", "examples/server_typescript.mjs"):
+                 "examples/server_python.py", "examples/server_typescript.mjs",
+                 "examples/devto-etl", "examples/devto_etl.py", "examples/devto_etl_demo.py",
+                 "examples/payment-resume", "examples/payment_resume.py",
+                 "examples/payment_resume.mjs", "examples/payment_resume_demo.py"):
         require(bool(files.get(path)), f"{target}: missing {path}")
     require(b"Apache License" in files["LICENSE"], f"{target}: missing Apache license text")
     require(not any(path.endswith((".rs", "Cargo.toml", "Cargo.lock")) for path in files),
