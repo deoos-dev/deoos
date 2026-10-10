@@ -21,7 +21,6 @@ rows.append('<div class="l"><span></span></div>')
 rows.append('<div class="l"><span><span class="cur"></span></span></div>')
 t=open('template.html').read()+'<div class="doc">'
 head=t.split('<div class="doc">')[0]
-head=head.replace('<title>hckshr</title>','<title>deoos</title>').replace('<div class="tab">hckshr</div>','<div class="tab">deoos</div>')
 head=re.sub(r'<meta name="description" content="[^"]*">','<meta name="description" content="DEOOS: durable execution on object storage. Ordinary functions that survive failures, with state in your own bucket.">',head)
 import re as _r
 head=_r.sub(r'<link rel="icon" href="data:[^"]*">','<link rel="icon" type="image/svg+xml" href="/logo.svg"><link rel="apple-touch-icon" href="/apple-touch-icon.png">',head)
