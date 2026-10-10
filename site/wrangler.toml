@@ -1,0 +1,7 @@
+name = "deoos"
+pages_build_output_dir = "public"
+compatibility_date = "2026-10-01"
+
+[[kv_namespaces]]
+binding = "SIGNUPS"
+id = "017b730a38914fa2bd4600c336e14553"
