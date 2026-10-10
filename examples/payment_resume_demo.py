@@ -154,8 +154,9 @@ def stop(process):
 
 
 def main(args):
+    STORAGE["endpoint"] = getattr(args, "endpoint", STORAGE["endpoint"])
     run = uuid.uuid4().hex[:12]
-    directory = ROOT / "outputs" / "payment-resume" / run
+    directory = getattr(args, "directory", ROOT / "outputs" / "payment-resume") / run
     directory.mkdir(parents=True)
     bucket = "deoos-payment-" + run
     report = {"bucket": bucket, "prefix": "payment-resume/", "cases": [], "cleaned": False,
@@ -195,7 +196,7 @@ def main(args):
             with (directory / f"{mode}-server.log").open("w") as log:
                 try:
                     if mode == "server":
-                        server, config = start_server(args.server, bucket, config["prefix"], log)
+                        server, config = start_server(args.server, bucket, config["prefix"], log, endpoint=STORAGE["endpoint"])
                     with client_for(config) as client:
                         for language in languages:
                             for stage in ("saved", "gap"):
@@ -295,6 +296,8 @@ def main(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--directory", type=Path, default=ROOT / "outputs" / "payment-resume")
+    parser.add_argument("--endpoint", default=STORAGE["endpoint"])
     parser.add_argument("--server", type=Path)
     parser.add_argument("--node-sdk", type=Path, help="Also verify the TypeScript workflow using this SDK index.js")
     parser.add_argument("--key-window-seconds", type=int, default=86400)

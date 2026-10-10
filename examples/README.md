@@ -1,40 +1,46 @@
 # DEOOS use cases
 
-These examples demonstrate recovery in library and server mode. Hacker News and DEV articles use real public APIs; the HTTP integrations use a simulated service. The Hacker News and HTTP workflows have interchangeable Python and TypeScript workers; the DEV example uses Python.
+These examples demonstrate recovery in library and server mode. Hacker News and DEV articles use real public APIs; the HTTP integrations use a simulated service. The workflows have Python and TypeScript implementations.
 
 ## Hacker News → DuckDB
 
-Requires a Mac with Apple Silicon, `uv`, and Docker installed and running. From this repository:
+Docker is the only prerequisite. From this repository or an extracted release:
 
 ```sh
-./examples/hacker-news
+docker compose -p deoos run --build --rm hacker-news
 ```
 
-The launcher starts local RustFS and installs the released SDK and dependencies automatically. The demo collects 100 live Hacker News items, kills the worker after 20 stored items, waits for lease recovery, resumes it, and verifies the saved database contents.
+The Linux container starts local RustFS and installs the released SDK and dependencies automatically. The demo collects 100 live Hacker News items, kills the worker after 20 stored items, waits for lease recovery, resumes it, and verifies the saved database contents.
 
-Open the printed file with `duckdb <database-path>`. No environment configuration is needed.
+Results stay in `outputs/hacker-news/`. Open the database there with the DuckDB CLI. No environment configuration is needed; RustFS stays running.
 
 ## Other use cases
 
 ### DEV articles → CSV
 
-Requires Mac Apple Silicon, `uv`, and Docker. Run:
+Run:
 
 ```sh
-./examples/devto-etl
+docker compose -p deoos run --build --rm devto-etl
 ```
 
-Based on Prefect's [API-sourced ETL example](https://docs.prefect.io/v3/examples/run-api-sourced-etl): fetch three pages of articles, normalize engagement fields, and write `devto_articles.csv`. The workflow is in `devto_etl.py`; it uses Python's standard library and deduplicates overlapping article IDs.
+Based on Prefect's [API-sourced ETL example](https://docs.prefect.io/v3/examples/run-api-sourced-etl): fetch three pages of articles, normalize engagement fields, and write `devto_articles.csv`. The workflows are `devto_etl.py` and `devto_etl.mjs`; they deduplicate overlapping article IDs. Array values in the CSV use JSON.
 
-The demo captures three live API responses once and replays those unchanged responses through a counted local HTTP source. In both library and server mode, it kills the worker after page 2 is checkpointed, then after the CSV write before its checkpoint. It verifies each page was fetched once per workflow and both CSVs have identical contents with no duplicate rows. Results stay in `outputs/devto-etl/`; its temporary RustFS bucket is removed. RustFS stays running.
+The demo captures three live API responses once and replays those unchanged responses through a counted local HTTP source. With both SDKs in library and server mode, it kills the worker after page 2 is checkpointed, then after the CSV write before its checkpoint. It verifies each page was fetched once per workflow and all CSVs have identical contents with no duplicate rows. Results stay in `outputs/devto-etl/`; its temporary RustFS bucket is removed. RustFS stays running.
 
 The CSV is local to the worker host. Replacement workers need access to that same destination path; server mode shares workflow state, not files. CSV replacement is idempotent for one workflow owning one output path. Use separate paths for independent runs.
 
 ### Payment → approval → fulfil
 
-Run `./examples/payment-resume` on Mac Apple Silicon with `uv` and Docker installed. No payment account or API keys are needed. The Python workflow is `payment_resume.py`; `payment_resume.mjs` provides the same TypeScript workflow.
+Run:
 
-The fake API retains idempotency keys for a configurable window (24 hours by default). The demo advances its virtual clock instantly, kills the worker after the charge checkpoint, and resumes beyond that window: the charge is not called again. A second execution crashes after the call but before its checkpoint and retries within the window with the same key, producing one charge. Both cases run in library and server mode, wait for an approval signal, and verify one fulfilment. Evidence stays in `outputs/payment-resume/`; the temporary workflow bucket is removed. RustFS stays running.
+```sh
+docker compose -p deoos run --build --rm payment-resume
+```
+
+ No payment account or API keys are needed. The Python workflow is `payment_resume.py`; `payment_resume.mjs` provides the same TypeScript workflow.
+
+The fake API retains idempotency keys for a configurable window (24 hours by default). The demo advances its virtual clock instantly, kills the worker after the charge checkpoint, and resumes beyond that window: the charge is not called again. A second execution crashes after the call but before its checkpoint and retries within the window with the same key, producing one charge. Both cases run with both SDKs in library and server mode, wait for an approval signal, and verify one fulfilment. Evidence stays in `outputs/payment-resume/`; the temporary workflow bucket is removed. RustFS stays running.
 
 An uncommitted charge resumed after key expiry requires checking the payment provider's transaction records before sending another charge. This example demonstrates saved-result replay and retries within the key window; it does not implement that reconciliation.
 
@@ -49,6 +55,10 @@ An uncommitted charge resumed after key expiry requires checking the payment pro
 The runnable examples use the simulated HTTP adapter described below.
 
 The paired programs are `use_cases.py` and `use_cases.mjs`. They use only the DEOOS SDK and language standard libraries. Install the SDK for your platform before running them; keep the JavaScript example inside the Node project where you installed `deoos`.
+
+## Native execution
+
+The workflow files also run outside Docker with the SDK and their dependencies installed for your platform. Hacker News uses DuckDB; DEV CSV and payment workflows use language standard libraries. The recovery harnesses use Python, `boto3`, and the server executable. Run a harness with `--help` for its native options, including the RustFS endpoint. Node 22+ is needed for the TypeScript variants.
 
 ## Deployment
 
@@ -83,4 +93,4 @@ Replace `python examples/use_cases.py` with `node examples/use_cases.mjs` for Ty
 
 ## Verification
 
-From the source repository, run `make setup test-examples PYTHON=python3.12` (Rust, Node and Docker Compose required). This runs all three examples with both SDKs and modes, including retries and worker replacement. The harness creates and removes its own test bucket; stop the manually started service before running it.
+From the source repository, run `make setup test-examples PYTHON=python3.12` (Rust, Node and Docker Compose required). This runs the HTTP integrations and payment recovery with both SDKs and modes, including retries and worker replacement. The Docker commands above verify the three demos. The harness creates and removes its own test bucket; stop the manually started service before running it.

@@ -76,7 +76,8 @@ def write_csv(output_path, rows):
             writer = csv.DictWriter(stream, fieldnames=FIELDS)
             writer.writeheader()
             for row in rows:
-                writer.writerow(row)
+                # Nested CSV cells use JSON so Python and TypeScript write the same values.
+                writer.writerow({key: csv_value(value) for key, value in row.items()})
             stream.flush()
             os.fsync(stream.fileno())
         # A replay after replacement writes the same content to the same destination.
@@ -85,6 +86,14 @@ def write_csv(output_path, rows):
     finally:
         if temporary is not None:
             temporary.unlink(missing_ok=True)
+
+
+def csv_value(value):
+    if isinstance(value, (list, dict)):
+        return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    return "" if value is None else str(value)
 
 
 def etl(ctx, inputs):

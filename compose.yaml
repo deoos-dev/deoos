@@ -1,3 +1,13 @@
+x-demo: &demo
+  image: deoos-examples:local
+  build: ./examples
+  profiles: [demo]
+  init: true
+  depends_on: [rustfs]
+  volumes:
+    - ./examples:/app/examples:ro
+    - ./outputs:/app/outputs
+
 services:
   rustfs:
     image: rustfs/rustfs@sha256:8cc9801755448b71a786705ce76692c77e14936cccd87cf2fc31842e58f4d1ff
@@ -9,5 +19,14 @@ services:
       RUSTFS_SECRET_KEY: local-development-only-secret
     volumes:
       - rustfs-data:/data
+  hacker-news:
+    <<: *demo
+    entrypoint: [deoos-demo, hacker-news]
+  devto-etl:
+    <<: *demo
+    entrypoint: [deoos-demo, devto-etl]
+  payment-resume:
+    <<: *demo
+    entrypoint: [deoos-demo, payment-resume]
 volumes:
   rustfs-data:

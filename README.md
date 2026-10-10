@@ -8,7 +8,7 @@ Write ordinary functions. Completed steps are remembered; unfinished steps retry
 
 Download the package for your platform from [Releases](https://github.com/deoos-dev/deoos/releases). Python 3.10+ and Node 22+ are required for their respective SDKs; no Rust compiler is needed. Choose the archive matching your operating system and CPU. Release notes list the available builds.
 
-0.7.1 includes packages for macOS (Apple Silicon and Intel), Linux (x86_64 and arm64, glibc 2.28+), and Windows x86_64. The 0.6.0 storage layout is incompatible; start with a fresh state directory or execution prefix.
+0.7.2 includes packages for macOS (Apple Silicon and Intel), Linux (x86_64 and arm64, glibc 2.28+), and Windows x86_64. The 0.6.0 storage layout is incompatible; start with a fresh state directory or execution prefix.
 
 ```sh
 uv venv --python 3.12 .venv
@@ -22,42 +22,17 @@ Packages are not yet published to registries. Each release includes both SDKs, t
 
 ## Quick start
 
-The Hacker News demo currently requires a Mac with Apple Silicon, `uv`, and Docker:
+From the repository or an extracted release, run:
 
 ```sh
-./examples/hacker-news
+docker compose -p deoos run --build --rm hacker-news
 ```
 
-It starts local RustFS, runs the demo, stops a worker after 20 items, then resumes after lease recovery and checks the saved DuckDB data. See [the example guide](examples/README.md) for details.
+Docker is the only prerequisite. The Linux container installs the released SDKs, starts a worker against local RustFS, stops it after 20 items, then resumes and checks the saved DuckDB data. It works on x86_64 and arm64 Docker hosts. Results stay in `outputs/hacker-news/`; RustFS stays running.
 
-On other platforms, install the wheel/tgz for your platform as shown above. From the directory containing `compose.yaml`, start local RustFS:
+Try `devto-etl` or `payment-resume` in the same command for CSV ingestion or payment recovery. See [the examples](examples/README.md) for the workflow code and native execution options.
 
-```sh
-docker compose -p deoos up -d
-```
-
-Create the local bucket with the AWS CLI and the development credentials from `compose.yaml`:
-
-```sh
-AWS_ACCESS_KEY_ID=local-development \
-AWS_SECRET_ACCESS_KEY=local-development-only-secret \
-AWS_ENDPOINT_URL=http://127.0.0.1:19000 \
-aws s3api create-bucket --bucket my-workflows --region us-east-1
-```
-
-Configure `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` with those same development credentials for the worker. Save the Python snippet below as `hello.py`; for local RustFS, add these lines at the top:
-
-```python
-import os
-os.environ["AWS_ENDPOINT"] = "http://127.0.0.1:19000"
-os.environ["AWS_ALLOW_HTTP"] = "true"
-```
-
-```sh
-python hello.py
-```
-
-Both SDK snippets use library mode. For cloud storage, use your own bucket, region and credentials without the local RustFS settings. The [examples](examples/README.md#deployment) show provider configuration.
+For your own application, install the SDK as shown above. These snippets use library mode with your bucket and cloud credentials.
 
 ### Python
 

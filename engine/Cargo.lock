@@ -216,7 +216,7 @@ dependencies = [
 
 [[package]]
 name = "deoos-engine"
-version = "0.7.1"
+version = "0.7.2"
 dependencies = [
  "async-trait",
  "axum",

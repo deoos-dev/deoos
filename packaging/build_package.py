@@ -205,7 +205,7 @@ def package(label: str, suffix: str, npm_os: str, npm_cpu: str, explicit_target:
     shutil.copy2(ROOT / "compose.yaml", release / "compose.yaml")
     examples = release / "examples"
     examples.mkdir()
-    for name in ("README.md", "library_python.py", "library_typescript.mjs", "server_python.py", "server_typescript.mjs", "workflow_python.py", "workflow_typescript.mjs", "use_cases.py", "use_cases.mjs", "hacker_news.py", "hacker_news.mjs", "hacker-news", "hacker_news_demo.py", "devto-etl", "devto_etl.py", "devto_etl_demo.py", "payment-resume", "payment_resume.py", "payment_resume.mjs", "payment_resume_demo.py"):
+    for name in ("Dockerfile", ".dockerignore", "docker_runner.sh", "README.md", "library_python.py", "library_typescript.mjs", "server_python.py", "server_typescript.mjs", "workflow_python.py", "workflow_typescript.mjs", "use_cases.py", "use_cases.mjs", "hacker_news.py", "hacker_news.mjs", "hacker-news", "hacker_news_demo.py", "devto-etl", "devto_etl.py", "devto_etl.mjs", "devto_etl_demo.py", "payment-resume", "payment_resume.py", "payment_resume.mjs", "payment_resume_demo.py"):
         shutil.copy2(ROOT / "examples" / name, examples / name)
     # Isolate the selected native artifact from cached libraries for other platforms.
     with tempfile.TemporaryDirectory(prefix="deoos-python-") as temp:

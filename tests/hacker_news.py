@@ -15,6 +15,7 @@ from botocore.exceptions import ClientError
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 HANDLER = 'hacker-news.collect.v1'
 parser = argparse.ArgumentParser(description=__doc__)
+parser.add_argument('--endpoint', default='http://127.0.0.1:19000')
 parser.add_argument('--python', default=sys.executable)
 parser.add_argument('--node', default=os.environ.get('DEOOS_TEST_NODE', 'node'))
 parser.add_argument('--python-example', default=str(ROOT / 'examples/hacker_news.py'))
@@ -160,7 +161,7 @@ def verify(database, source, tasks, seeded, baseline=None):
 
 bucket = 'deoos-hn-' + uuid.uuid4().hex[:20]
 os.environ.update(AWS_ACCESS_KEY_ID='local-development', AWS_SECRET_ACCESS_KEY='local-development-only-secret',
-                  AWS_REGION='us-east-1', AWS_ENDPOINT='http://127.0.0.1:19000', AWS_ALLOW_HTTP='true',
+                  AWS_REGION='us-east-1', AWS_ENDPOINT=args.endpoint, AWS_ALLOW_HTTP='true',
                   DEOOS_STORAGE_BUCKET=bucket, DEOOS_STORAGE_PROVIDER='s3', LEASE_MS='2000')
 os.environ.pop('AWS_SESSION_TOKEN', None)
 s3 = boto3.client('s3', endpoint_url=os.environ['AWS_ENDPOINT'], region_name='us-east-1')
