@@ -2,23 +2,11 @@
 
 Durable execution on object storage.
 
-Write ordinary functions. Completed steps are remembered; unfinished steps retry after failure. Keep workflow state in your own bucket (S3, Azure Blob, GCS, R2, or self-hosted RustFS), with no database to run.
+Write ordinary functions that recover from failures. DEOOS saves completed steps and retries unfinished work, keeping workflow state in object storage—S3, Azure Blob, GCS, R2, or self-hosted RustFS. No database to manage.
 
 ## Install
 
 Download the package for your platform from [Releases](https://github.com/deoos-dev/deoos/releases). Python 3.10+ and Node 22+ are required for their respective SDKs; no Rust compiler is needed. Choose the archive matching your operating system and CPU. Release notes list the available builds.
-
-0.7.2 includes packages for macOS (Apple Silicon and Intel), Linux (x86_64 and arm64, glibc 2.28+), and Windows x86_64. The 0.6.0 storage layout is incompatible; start with a fresh state directory or execution prefix.
-
-```sh
-uv venv --python 3.12 .venv
-source .venv/bin/activate
-uv pip install /path/to/release/python/*.whl
-# In your Node project:
-npm install /path/to/release/node/*.tgz
-```
-
-Packages are not yet published to registries. Each release includes both SDKs, the server executable, examples and checksums.
 
 ## Quick start
 
@@ -32,7 +20,7 @@ Docker is the only prerequisite. The Linux container installs the released SDKs,
 
 Try `devto-etl` or `payment-resume` in the same command for CSV ingestion or payment recovery. See [the examples](examples/README.md) for the workflow code and native execution options.
 
-For your own application, install the SDK as shown above. These snippets use library mode with your bucket and cloud credentials.
+For your own application, install the SDK from the latest release. These snippets use library mode with your bucket and cloud credentials.
 
 ### Python
 
