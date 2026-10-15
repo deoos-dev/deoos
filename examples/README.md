@@ -16,6 +16,20 @@ Results stay in `outputs/hacker-news/`. Open the database there with the DuckDB 
 
 ## Other use cases
 
+### Text documents → searchable index
+
+From the source repository, run:
+
+```sh
+docker compose -p deoos run --build --rm document-index
+```
+
+The demo creates a small set of sample text documents, reads and indexes them, and writes a searchable JSON file. No API keys or external document service are needed. The workflows are `document_index.py` and `document_index.mjs`.
+
+With both SDKs in library and server mode, it kills the worker after saved document checkpoints, then after publishing the index before its checkpoint commits. Recovery keeps saved results and safely replaces the index with the same contents. The demo checks the document text, search results, and callback counts, then removes its temporary RustFS bucket. Files stay in `outputs/document-index/`; RustFS stays running.
+
+The index and source documents are local to the worker host. Replacement workers need the same destination path and access to any documents not yet read. Use one output path per workflow. Search matches lowercase ASCII words; this is a small text-file example, not PDF extraction or semantic search.
+
 ### DEV articles → CSV
 
 Run:
@@ -93,4 +107,4 @@ Replace `python examples/use_cases.py` with `node examples/use_cases.mjs` for Ty
 
 ## Verification
 
-From the source repository, run `make setup test-examples PYTHON=python3.12` (Rust, Node and Docker Compose required). This runs the HTTP integrations and payment recovery with both SDKs and modes, including retries and worker replacement. The Docker commands above verify the three demos. The harness creates and removes its own test bucket; stop the manually started service before running it.
+From the source repository, run `make setup test-examples PYTHON=python3.12` (Rust, Node and Docker Compose required). This runs the HTTP integrations and payment recovery with both SDKs and modes, including retries and worker replacement. The Docker commands above verify each demo. The harness creates and removes its own test bucket; stop the manually started service before running it.

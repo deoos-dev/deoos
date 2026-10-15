@@ -20,6 +20,8 @@ Docker is the only prerequisite. The Linux container installs the released SDKs,
 
 Try `devto-etl` or `payment-resume` in the same command for CSV ingestion or payment recovery. See [the examples](examples/README.md) for the workflow code and native execution options.
 
+From the source repository, try `document-index` to turn text files into a searchable index and verify recovery after worker crashes.
+
 For your own application, install the SDK from the latest release. These snippets use library mode with your bucket and cloud credentials.
 
 ### Python

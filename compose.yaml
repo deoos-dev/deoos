@@ -28,5 +28,8 @@ services:
   payment-resume:
     <<: *demo
     entrypoint: [deoos-demo, payment-resume]
+  document-index:
+    <<: *demo
+    entrypoint: [deoos-demo, document-index]
 volumes:
   rustfs-data:

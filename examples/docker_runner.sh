@@ -1,14 +1,14 @@
 #!/bin/sh
 set -eu
 
-demo=${1:?Choose hacker-news, devto-etl or payment-resume.}
+demo=${1:?Choose hacker-news, devto-etl, payment-resume or document-index.}
 shift
 case "$demo" in
   hacker-news)
     exec python /app/examples/hacker_news_demo.py \
       --endpoint http://rustfs:9000 --directory /app/outputs/hacker-news "$@"
     ;;
-  devto-etl|payment-resume)
+  devto-etl|payment-resume|document-index)
     script=$(printf '%s' "$demo" | tr '-' '_')
     exec python "/app/examples/${script}_demo.py" \
       --endpoint http://rustfs:9000 --directory "/app/outputs/$demo" \
