@@ -4,6 +4,8 @@ Durable execution on object storage.
 
 Write ordinary functions that recover from failures. DEOOS saves completed steps and retries unfinished work, keeping workflow state in object storage—S3, Azure Blob, GCS, R2, or self-hosted RustFS. No database to manage.
 
+[deoos.dev](https://deoos.dev)
+
 ## Install
 
 Download the package for your platform from [Releases](https://github.com/deoos-dev/deoos/releases). Python 3.10+ and Node 22+ are required for their respective SDKs; no Rust compiler is needed. Choose the archive matching your operating system and CPU. Release notes list the available builds.
