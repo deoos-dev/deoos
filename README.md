@@ -1,8 +1,8 @@
 # DEOOS
 
-Durable execution on object storage.
+deoos is a durable-workflow engine on object storage. It lifts a workflow off an old job runner or a pile of scripts, ties that system to a bucket and to current tools, and runs in one process or beside a server. Add it to a workflow, start a new one, or replace the old one. People operate it with the CLI and `/ui`. An agent should use the same CLI and MCP tools.
 
-Write ordinary functions that recover from failures. DEOOS saves completed steps and retries unfinished work, keeping workflow state in object storage—S3, Azure Blob, GCS, R2, or self-hosted RustFS. No database to manage.
+Completed steps are remembered. Unfinished steps retry. State stays in your bucket: S3, Azure Blob, GCS, R2, or self-hosted RustFS. No database to run.
 
 [deoos.dev](https://deoos.dev)
 
@@ -10,48 +10,57 @@ Write ordinary functions that recover from failures. DEOOS saves completed steps
 
 Download the package for your platform from [Releases](https://github.com/deoos-dev/deoos/releases). Python 3.10+ and Node 22+ are required for their respective SDKs; no Rust compiler is needed. Choose the archive matching your operating system and CPU. Release notes list the available builds.
 
-## Quick start
-
-From the repository or an extracted release, run:
+0.7.2 includes packages for macOS (Apple Silicon and Intel), Linux (x86_64 and arm64, glibc 2.28+), and Windows x86_64. The 0.6.0 storage layout is incompatible; start with a fresh state directory or execution prefix.
 
 ```sh
-docker compose -p deoos run --build --rm hacker-news
+uv venv --python 3.12 .venv
+source .venv/bin/activate
+uv pip install /path/to/release/python/*.whl
+# In your Node project:
+npm install /path/to/release/node/*.tgz
 ```
 
-Docker is the only prerequisite. The Linux container installs the released SDKs, starts a worker against local RustFS, stops it after 20 items, then resumes and checks the saved DuckDB data. It works on x86_64 and arm64 Docker hosts. Results stay in `outputs/hacker-news/`; RustFS stays running.
+Packages are not yet published to registries. Each release includes both SDKs, the server executable, examples, and checksums.
 
-Try `devto-etl` or `payment-resume` in the same command for CSV ingestion or payment recovery. See [the examples](examples/README.md) for the workflow code and native execution options.
+## Two minutes
 
-From the source repository, try `document-index` to turn text files into a searchable index and verify recovery after worker crashes.
+Three local pages, a crash after the first saved page, then a resume. Exit code 86 is the crash, in the example itself. `articles.csv.fetches` shows page 1 was fetched once. The bucket must already exist. [examples/README.md](examples/README.md) has the RustFS environment.
 
-For your own application, install the SDK from the latest release. These snippets use library mode with your bucket and cloud credentials.
-
-### Python
-
-```python
-from deoos import Client
-
-with Client(bucket="my-workflows", region="us-east-1") as engine:
-    def greet(ctx, inputs):
-        return ctx.step("greeting", lambda: f"Hello, {inputs['name']}!")
-
-    engine.submit("greeting-001", "greet", {"name": "World"})
-    engine.run_once({"greet": greet})
-    print(engine.view("greeting-001"))
+```sh
+python examples/pages.py submit --id snap-001 --output "$PWD/articles.csv"
+python examples/pages.py work --id snap-001 --crash-after fetch-page-1
+python examples/pages.py work --id snap-001
 ```
 
-### TypeScript
+If the dead process still holds the lease, the second `work` waits for it to expire. The default is 30 seconds.
 
-```typescript
-import { Client } from "deoos";
+## Examples
 
-const engine = new Client({bucket: "my-workflows", region: "us-east-1"});
-await engine.submit("greeting-002", "greet", {name: "World"});
-await engine.runOnce({greet: async (ctx, inputs) =>
-  ctx.step("greeting", () => `Hello, ${inputs.name}!`)
-});
-console.log(await engine.view("greeting-002"));
+| Example | What one run shows |
+| --- | --- |
+| `examples/pages.py` | Page checkpoints, a visible crash, and resume. Start here. |
+| `examples/charge.py` | Approve, then one charge. Crash after the call and before the checkpoint. |
+| `examples/footprint.py` | One process and one bucket. Kill and resume. Fail, explain, retry, and cancel. Optional server and `/ui`. |
+| `examples/ingest.py` | Interval fan-out. Each tick reads `scheduled_at`. Pause and backfill. |
+| `examples/workflow_python.py`, `examples/workflow_typescript.mjs` | One order. Either language can resume it. |
+| `examples/hacker-news` | Optional larger demo: live Hacker News into DuckDB. The crash is in the Docker harness. |
+| `examples/devto-etl`, `examples/document-index`, `examples/payment-resume`, `examples/use_cases.py` | Older demos. `charge.py` replaces the payment harness as the example to run. `library_python.py` and `library_typescript.mjs` are the short greetings. |
+
+## For agents
+
+Use the CLI. Do not build a second orchestrator.
+
+```sh
+python -m deoos inspect TASK_ID
+python -m deoos explain TASK_ID
+python -m deoos retry TASK_ID
+python -m deoos cancel TASK_ID
+python -m deoos mcp
 ```
+
+`mcp` is read-only unless you pass `--allow-actions`. `inspect` prints the public view. `--internal` adds lease and storage fields.
+
+`DEOOS_MODE=library` uses in-process storage and ignores `ENGINE_URL`, so a leftover URL does not 404 the CLI. `DEOOS_MODE=server` requires `ENGINE_URL`. When `DEOOS_MODE` is unset, `ENGINE_URL` selects server mode and its absence selects library mode.
 
 The task ID identifies the work. Reusing it with the same definition returns the same task; use a new ID for new work. `run_once` / `runOnce` polls once. Use `run_worker` / `runWorker` for a continuous worker with application-controlled shutdown.
 
@@ -108,7 +117,7 @@ Inside a step, pass `ctx.idempotency_key("charge")` / `ctx.idempotencyKey("charg
 That key stays the same across retries and resumes and covers the gap between the call and its committed result, while the provider retains the key.
 After the provider's key window expires, an unfinished step in that gap needs a reconciliation check before calling again.
 Use globally unique execution IDs when sharing an external account; step keys do not include the bucket or prefix.
-Keep saved workflow state for the full pause. Try the local fake-payment example with `./examples/payment-resume`.
+Keep saved workflow state for the full pause. `python examples/charge.py` is that crash, against a local sink.
 
 ## Guarantees and limits
 

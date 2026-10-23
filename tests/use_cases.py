@@ -493,7 +493,7 @@ class WorkflowCase:
         return result
 
     def inspect(self, identifier):
-        return self.cli(self.second, "inspect", "--id", identifier)
+        return self.cli(self.second, "inspect", "--id", identifier, "--internal")
 
     def work_once(self, language):
         return self.cli(language, "work", "--once")

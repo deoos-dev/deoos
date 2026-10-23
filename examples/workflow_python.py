@@ -1,4 +1,7 @@
-"""Cross-language durable order demo; no payment or external service is called."""
+"""Cross-language order sample. charge.py and ingest.py are the tours.
+
+No payment or external service is called. Python or TypeScript can resume the same task.
+"""
 import argparse
 import json
 import os
@@ -104,8 +107,10 @@ def make_parser():
     approve = actions.add_parser("approve", help="approve an order (or pass --decline)")
     approve.add_argument("--id", required=True)
     approve.add_argument("--decline", action="store_true")
-    inspect = actions.add_parser("inspect", help="inspect an order task")
+    inspect = actions.add_parser("inspect", help="print the public view of an order task")
     inspect.add_argument("--id", required=True)
+    inspect.add_argument("--internal", action="store_true",
+                         help="print raw task state, including coordination fields")
     return parser
 
 
@@ -121,12 +126,15 @@ def main():
                 "unit_price": safe_integer(args.unit_price, "unit_price"),
                 "delay_ms": safe_integer(args.delay_ms, "delay_ms"),
             }
-            result = client.submit(task_id, "demo.order.v1", inputs)
+            client.submit(task_id, "demo.order.v1", inputs)
+            result = client.view(task_id)
         elif args.action == "approve":
             task_id = valid_id(args.id)
-            result = client.signal(task_id, "approved", {"approved": not args.decline})
+            client.signal(task_id, "approved", {"approved": not args.decline})
+            result = client.view(task_id)
         elif args.action == "inspect":
-            result = client.inspect(valid_id(args.id))
+            task_id = valid_id(args.id)
+            result = client.inspect(task_id) if args.internal else client.view(task_id)
         elif args.once:
             result = {"worked": client.run_once(HANDLERS)}
         else:

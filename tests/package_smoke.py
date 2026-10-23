@@ -213,8 +213,8 @@ def run_workflow_case(mode, first_language, resume_language, python, node,
                         worker_env, examples)
         assert worker.poll() is None, f"{first_language} worker stopped after failed order"
         if (failed["status"] == "failed" and valid["status"] == "waiting"
-                and valid.get("waiting_on") == {"kind": "signal", "name": "approved"}
-                and "cooldown" in valid["steps"]):
+                and valid.get("wait") == {"kind": "signal", "name": "approved", "assigned": False}
+                and "cooldown" in valid["completed_steps"]):
             break
         time.sleep(.25)
     else:
@@ -239,13 +239,12 @@ def run_workflow_case(mode, first_language, resume_language, python, node,
     assert result["attempts"] == 1, result
     assert result["output"] == {"order_id": valid_id, "total": 50, "approved": True}, result
     expected = {"validate", "price", "ready", "cooldown", "approved", "finalize"}
-    assert expected <= set(result["definitions"]), result.get("definitions")
-    assert expected <= set(result["steps"]), result.get("steps")
+    assert expected <= set(result["completed_steps"]), result.get("completed_steps")
     if server is not None:
         stop_process(server, "shared server")
     return {"mode": mode, "worker": first_language, "resume_worker": resume_language,
             "failed_attempts": failed["attempts"], "completed_attempts": result["attempts"],
-            "output": result["output"], "definitions": sorted(expected),
+            "output": result["output"], "completed_steps": sorted(expected),
             "server_restarted": mode == "server"}
 
 
@@ -747,7 +746,8 @@ def main():
     server_binary = package / "bin" / ("deoos-server.exe" if os.name == "nt" else "deoos-server")
     server_version = command([str(server_binary), "--version"], cwd=package).stdout.strip()
     for name in ("workflow_python.py", "workflow_typescript.mjs", "library_python.py",
-                 "library_typescript.mjs", "server_python.py", "server_typescript.mjs"):
+                 "library_typescript.mjs", "server_python.py", "server_typescript.mjs",
+                 "charge.py", "pages.py", "footprint.py", "ingest.py"):
         assert (examples / name).is_file(), f"missing packaged workflow example: {name}"
 
     bucket = None if args.backend == "filesystem" else (

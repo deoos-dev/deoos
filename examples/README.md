@@ -1,110 +1,118 @@
-# DEOOS use cases
+# Examples
 
-These examples demonstrate recovery in library and server mode. Hacker News and DEV articles use real public APIs; the HTTP integrations use a simulated service. The workflows have Python and TypeScript implementations.
+Four short programs. Each one runs in about three commands. The crash is a flag on `work`, and the process exits 86. It is not hidden in a harness.
 
-## Hacker News → DuckDB
+Python is the path. TypeScript is the order workflow, where the point is that the other language can resume the same task.
 
-Docker is the only prerequisite. From this repository or an extracted release:
+## Storage
+
+Library mode needs a bucket that already exists, plus credentials and `DEOOS_STORAGE_BUCKET` (or `AWS_BUCKET`). It is not zero-config. The filesystem provider is macOS ARM64 with local APFS only.
+
+```sh
+export DEOOS_MODE=library
+export DEOOS_STORAGE_BUCKET=my-workflows
+export AWS_REGION=us-east-1
+export AWS_ACCESS_KEY_ID=...
+export AWS_SECRET_ACCESS_KEY=...
+```
+
+Local RustFS, matching `compose.yaml`:
+
+```sh
+export AWS_ENDPOINT=http://127.0.0.1:19000
+export AWS_ALLOW_HTTP=true
+export AWS_ACCESS_KEY_ID=local-development
+export AWS_SECRET_ACCESS_KEY=local-development-only-secret
+export AWS_REGION=us-east-1
+export DEOOS_STORAGE_BUCKET=deoos
+```
+
+`DEOOS_MODE=library` ignores `ENGINE_URL`. Unset it, or set `DEOOS_MODE=server` when you mean the server. A dead process can still hold a task lease. The next `work` waits for it. The default lease is 30 seconds (`LEASE_MS`).
+
+## Pages
+
+Three built-in pages, one checkpoint each, then a CSV.
+
+```sh
+python examples/pages.py submit --id snap-001 --output "$PWD/articles.csv"
+python examples/pages.py work --id snap-001 --crash-after fetch-page-1
+python examples/pages.py work --id snap-001
+```
+
+`articles.csv.fetches` gains one line per fetch. Page 1 is not fetched again. `--crash-before-commit write-csv` exits after the file is on disk and before that checkpoint. The next `work` writes the same bytes again.
+
+## Charge
+
+A local sink on port 18181. Approve, then one charge. Decline runs a void and does not charge.
+
+```sh
+python examples/charge.py serve
+python examples/charge.py submit --id pay-001
+python examples/charge.py work --id pay-001
+python examples/charge.py approve --id pay-001
+python examples/charge.py work --id pay-001 --crash-before-commit charge
+python examples/charge.py work --id pay-001
+python examples/charge.py effects
+```
+
+The `work` after the crash replays the charge step. The sink records one charge because the idempotency key is the same. The sink's memory lasts as long as `serve`. An uncommitted call whose provider key has expired still needs a reconciliation read. This example does not do that.
+
+## One process
+
+Library mode is this process. Kill it after `collect` is committed. Start it again.
+
+```sh
+python examples/footprint.py submit --id job-001 --log "$PWD/job.log"
+python examples/footprint.py work --id job-001 --crash-after collect
+python examples/footprint.py work --id job-001
+python examples/footprint.py info
+```
+
+Fail, explain, retry, and cancel use the CLI:
+
+```sh
+python examples/footprint.py submit-flaky --id flaky-001
+python examples/footprint.py work --id flaky-001 --fail-flaky
+python -m deoos explain flaky-001
+python -m deoos retry flaky-001
+python examples/footprint.py work --id flaky-001
+
+python examples/footprint.py submit-hold --id hold-001
+python examples/footprint.py work --id hold-001
+python -m deoos cancel hold-001
+```
+
+Server mode is the same commands with `DEOOS_MODE=server`, `ENGINE_URL`, and `ENGINE_TOKEN`. Open `/ui` on that server. `footprint.py` has the `deoos-server` line.
+
+## Interval fan-out
+
+No cron. The interval is milliseconds. The default anchor is 15 seconds ago, so the first poll admits the latest tick and leaves a gap. Each tick writes `<scheduled_at>.json`. The parent reads `scheduled_at` off the task. Schedule inputs do not change per tick. `view` does not include that field.
+
+```sh
+python examples/ingest.py schedule --id hourly --output "$PWD/ingest-out"
+python examples/ingest.py work
+python examples/ingest.py pause --id hourly
+python examples/ingest.py backfill --id hourly
+python examples/ingest.py resume --id hourly
+python examples/ingest.py work
+```
+
+Pause before backfill. A paused schedule does not drain a backfill until you resume and work. Backfill is an SDK call. It is not a `python -m deoos` command. `work --follow` polls until Ctrl-C.
+
+## Order, either language
+
+`workflow_python.py` and `workflow_typescript.mjs` are the same order: validate and price as children, a timer, then an approval signal. Start it in one language and resume it in the other. Run the TypeScript file from the Node project that contains `node_modules/deoos`. Node resolves `deoos` from the file's location, not from `NODE_PATH`.
+
+`inspect` prints the public view. `--internal` prints lease and storage fields.
+
+## Optional
+
+`examples/hacker-news` is a larger live version of the page workflow: 100 Hacker News items into DuckDB. Docker runs the crash in a harness.
 
 ```sh
 docker compose -p deoos run --build --rm hacker-news
 ```
 
-The Linux container starts local RustFS and installs the released SDK and dependencies automatically. The demo collects 100 live Hacker News items, kills the worker after 20 stored items, waits for lease recovery, resumes it, and verifies the saved database contents.
+`devto-etl` and `document-index` are the same kind of harness for a CSV and a text index. `payment-resume` is the older charge harness. Run `charge.py` instead. `use_cases.py` and `use_cases.mjs` are the webhook, invoice, and import programs those harnesses grew from. `library_python.py` and `library_typescript.mjs` submit one greeting. `server_python.py` and `server_typescript.mjs` are the server-mode greeting.
 
-Results stay in `outputs/hacker-news/`. Open the database there with the DuckDB CLI. No environment configuration is needed; RustFS stays running.
-
-## Other use cases
-
-### Text documents → searchable index
-
-From the source repository, run:
-
-```sh
-docker compose -p deoos run --build --rm document-index
-```
-
-The demo creates a small set of sample text documents, reads and indexes them, and writes a searchable JSON file. No API keys or external document service are needed. The workflows are `document_index.py` and `document_index.mjs`.
-
-With both SDKs in library and server mode, it kills the worker after saved document checkpoints, then after publishing the index before its checkpoint commits. Recovery keeps saved results and safely replaces the index with the same contents. The demo checks the document text, search results, and callback counts, then removes its temporary RustFS bucket. Files stay in `outputs/document-index/`; RustFS stays running.
-
-The index and source documents are local to the worker host. Replacement workers need the same destination path and access to any documents not yet read. Use one output path per workflow. Search matches lowercase ASCII words; this is a small text-file example, not PDF extraction or semantic search.
-
-### DEV articles → CSV
-
-Run:
-
-```sh
-docker compose -p deoos run --build --rm devto-etl
-```
-
-Based on Prefect's [API-sourced ETL example](https://docs.prefect.io/v3/examples/run-api-sourced-etl): fetch three pages of articles, normalize engagement fields, and write `devto_articles.csv`. The workflows are `devto_etl.py` and `devto_etl.mjs`; they deduplicate overlapping article IDs. Array values in the CSV use JSON.
-
-The demo captures three live API responses once and replays those unchanged responses through a counted local HTTP source. With both SDKs in library and server mode, it kills the worker after page 2 is checkpointed, then after the CSV write before its checkpoint. It verifies each page was fetched once per workflow and all CSVs have identical contents with no duplicate rows. Results stay in `outputs/devto-etl/`; its temporary RustFS bucket is removed. RustFS stays running.
-
-The CSV is local to the worker host. Replacement workers need access to that same destination path; server mode shares workflow state, not files. CSV replacement is idempotent for one workflow owning one output path. Use separate paths for independent runs.
-
-### Payment → approval → fulfil
-
-Run:
-
-```sh
-docker compose -p deoos run --build --rm payment-resume
-```
-
- No payment account or API keys are needed. The Python workflow is `payment_resume.py`; `payment_resume.mjs` provides the same TypeScript workflow.
-
-The fake API retains idempotency keys for a configurable window (24 hours by default). The demo advances its virtual clock instantly, kills the worker after the charge checkpoint, and resumes beyond that window: the charge is not called again. A second execution crashes after the call but before its checkpoint and retries within the window with the same key, producing one charge. Both cases run with both SDKs in library and server mode, wait for an approval signal, and verify one fulfilment. Evidence stays in `outputs/payment-resume/`; the temporary workflow bucket is removed. RustFS stays running.
-
-An uncommitted charge resumed after key expiry requires checking the payment provider's transaction records before sending another charge. This example demonstrates saved-result replay and retries within the key window; it does not implement that reconciliation.
-
-### Other HTTP integrations
-
-| Use case | Durable behavior | Integration boundary |
-| --- | --- | --- |
-| Webhook delivery | Retry a transient failure; resume after worker replacement | HTTP destination must honor the supplied idempotency key |
-| Invoice approval | Persist a wait, stop the worker, then approve or decline | Approval signal followed by an idempotent accounting API call |
-| Scheduled ingestion | Fetch pages as child tasks, join them, publish a batch | Source API and idempotent batch destination |
-
-The runnable examples use the simulated HTTP adapter described below.
-
-The paired programs are `use_cases.py` and `use_cases.mjs`. They use only the DEOOS SDK and language standard libraries. Install the SDK for your platform before running them; keep the JavaScript example inside the Node project where you installed `deoos`.
-
-## Native execution
-
-The workflow files also run outside Docker with the SDK and their dependencies installed for your platform. Hacker News uses DuckDB; DEV CSV and payment workflows use language standard libraries. The recovery harnesses use Python, `boto3`, and the server executable. Run a harness with `--help` for its native options, including the RustFS endpoint. Node 22+ is needed for the TypeScript variants.
-
-## Deployment
-
-In cloud deployments, run workers in the relevant cloud near the authoritative object store. In self-hosted deployments, run workers beside RustFS or on the same machine. Library mode puts Rust in each worker process; server mode uses a separate engine service. Storage and destination services remain dependencies in either mode.
-
-For R2, use the S3 provider with your account endpoint and region `auto`. GCS and Azure use `DEOOS_STORAGE_PROVIDER=gcs` or `azure` with their native `GOOGLE_*` or `AZURE_*` credentials. Use the same bucket/container and execution prefix across workers.
-
-For library mode, configure `DEOOS_MODE=library`, `DEOOS_STORAGE_BUCKET`, storage credentials and optionally `EXECUTION_PREFIX`. `DEOOS_STORAGE_PROVIDER` selects `s3` (default), `gcs` or `azure`. For S3, configure `AWS_REGION`. For local RustFS, also use `AWS_ENDPOINT=http://127.0.0.1:19000` and `AWS_ALLOW_HTTP=true`, with the development credentials in the repository's `compose.yaml`.
-
-For server mode, configure the engine with the storage settings, start `deoos-server`, then set `DEOOS_MODE=server`, `ENGINE_URL` and, if enabled, `ENGINE_TOKEN` on workers. Server-mode workers need no storage credentials.
-
-## Service adapter
-
-`SERVICE_URL` selects the HTTP service used by these examples. Use your integration adapter or the local simulated service from `tests/use_cases.py`. The test service is for development only. It demonstrates destination idempotency while workers restart; it is not a production accounting or ingestion service.
-
-Use `--help` on either program for commands and inputs. Stable task IDs deduplicate submissions of the same definition; reuse an ID only for the same handler and inputs. Named steps replay their committed results. An HTTP operation may repeat after a crash before its checkpoint commits, so destination idempotency is required.
-
-## Run the examples
-
-From the source repository, start the simulated destination with `python3 tests/use_cases.py --serve --port 18080`. Configure storage or the server-mode connection as above, then set `SERVICE_URL=http://127.0.0.1:18080`. In another terminal, run a worker with `python examples/use_cases.py work` or `node examples/use_cases.mjs work`. Keep the worker's configuration the same when changing languages.
-
-```sh
-python examples/use_cases.py submit webhook --id delivery-001 --event-id event-001
-python examples/use_cases.py submit invoice --id approval-001 --amount-cents 2500
-python examples/use_cases.py signal --id approval-001
-python examples/use_cases.py submit import --id import-001 --source demo --pages 2
-python examples/use_cases.py schedule --id daily-demo --source demo --pages 2
-python examples/use_cases.py inspect --id import-001
-```
-
-Replace `python examples/use_cases.py` with `node examples/use_cases.mjs` for TypeScript. The daily schedule uses fixed 24-hour intervals, not timezone-aware cron. Pass `--decline` to `signal` to decline an invoice; no invoice request is issued. Stop a worker while approval is pending, send the signal, then start the opposite-language worker to observe recovery. Stop the manual test service when finished; its in-memory effects ledger resets when it stops.
-
-## Verification
-
-From the source repository, run `make setup test-examples PYTHON=python3.12` (Rust, Node and Docker Compose required). This runs the HTTP integrations and payment recovery with both SDKs and modes, including retries and worker replacement. The Docker commands above verify each demo. The harness creates and removes its own test bucket; stop the manually started service before running it.
+Docker demo output stays under `outputs/`. RustFS stays running.

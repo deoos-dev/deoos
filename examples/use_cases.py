@@ -222,6 +222,8 @@ def make_parser():
     inspect = actions.add_parser("inspect")
     inspect.add_argument("--id", required=True)
     inspect.add_argument("--schedule", action="store_true")
+    inspect.add_argument("--internal", action="store_true",
+                         help="print raw task state, including coordination fields")
     return parser
 
 
@@ -243,17 +245,26 @@ def main():
             validate(case, inputs)
         client = create_client()
         if args.action == "submit":
-            result = client.submit(valid_id(args.id or args.case + "-" + uuid.uuid4().hex),
-                                   CASE_HANDLERS[args.case], inputs, max_attempts=3, retry_ms=1000)
+            task_id = valid_id(args.id or args.case + "-" + uuid.uuid4().hex)
+            client.submit(task_id, CASE_HANDLERS[args.case], inputs, max_attempts=3, retry_ms=1000)
+            result = client.view(task_id)
         elif args.action == "schedule":
             result = client.schedule(valid_id(args.id), CASE_HANDLERS["import"], inputs,
                                      safe_integer(args.interval_ms, "interval_ms", 1),
                                      first_due_ms=args.first_due_ms, missed="latest", overlap="skip",
                                      max_attempts=3, retry_ms=1000)
         elif args.action == "signal":
-            result = client.signal(valid_id(args.id), "approval", {"approved": not args.decline})
+            task_id = valid_id(args.id)
+            client.signal(task_id, "approval", {"approved": not args.decline})
+            result = client.view(task_id)
         elif args.action == "inspect":
-            result = (client.inspect_schedule if args.schedule else client.inspect)(valid_id(args.id))
+            task_id = valid_id(args.id)
+            if args.schedule:
+                result = client.inspect_schedule(task_id)
+            elif args.internal:
+                result = client.inspect(task_id)
+            else:
+                result = client.view(task_id)
         elif args.once:
             result = {"worked": client.run_once(HANDLERS)}
         else:

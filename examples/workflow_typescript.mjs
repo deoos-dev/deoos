@@ -1,5 +1,8 @@
 #!/usr/bin/env node
-// Cross-language durable order demo; no payment or external service is called.
+// Cross-language order sample. charge.py and ingest.py are the tours.
+// No payment or external service is called. Python or TypeScript can resume the same task.
+// Run this file from the Node project that contains node_modules/deoos.
+// Node resolves `deoos` from this file's location, not from NODE_PATH.
 import { randomUUID } from 'node:crypto';
 import { parseArgs } from 'node:util';
 import { Client } from 'deoos';
@@ -97,7 +100,7 @@ async function main() {
     console.log('  submit [--id ID] [--quantity N] [--unit-price N] [--delay-ms N]');
     console.log('  work [--once]');
     console.log('  approve --id ID [--decline]');
-    console.log('  inspect --id ID');
+    console.log('  inspect --id ID [--internal]');
     console.log('Set DEOOS_MODE=server with ENGINE_URL, or DEOOS_MODE=library with DEOOS_STORAGE_BUCKET and optional DEOOS_STORAGE_PROVIDER (default s3).');
     return;
   }
@@ -105,7 +108,7 @@ async function main() {
     options: {
       id: { type: 'string' }, quantity: { type: 'string' },
       'unit-price': { type: 'string' }, 'delay-ms': { type: 'string' },
-      once: { type: 'boolean' }, decline: { type: 'boolean' },
+      once: { type: 'boolean' }, decline: { type: 'boolean' }, internal: { type: 'boolean' },
     },
     allowPositionals: true,
   });
@@ -122,19 +125,22 @@ async function main() {
       unit_price: parseInteger(values['unit-price'] ?? '25', 'unit-price'),
       delay_ms: parseInteger(values['delay-ms'] ?? '1000', 'delay-ms'),
     };
-    console.log(JSON.stringify(await client.submit(id, 'demo.order.v1', inputs), null, 2));
+    await client.submit(id, 'demo.order.v1', inputs);
+    console.log(JSON.stringify(await client.view(id), null, 2));
     return;
   }
   if (action === 'approve') {
     if (!values.id) throw new Error('approve requires --id');
-    console.log(JSON.stringify(await client.signal(
-      validId(values.id), 'approved', { approved: !values.decline },
-    ), null, 2));
+    const id = validId(values.id);
+    await client.signal(id, 'approved', { approved: !values.decline });
+    console.log(JSON.stringify(await client.view(id), null, 2));
     return;
   }
   if (action === 'inspect') {
     if (!values.id) throw new Error('inspect requires --id');
-    console.log(JSON.stringify(await client.inspect(validId(values.id)), null, 2));
+    const id = validId(values.id);
+    const state = values.internal ? await client.inspect(id) : await client.view(id);
+    console.log(JSON.stringify(state, null, 2));
     return;
   }
   if (values.once) {

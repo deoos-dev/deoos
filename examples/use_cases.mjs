@@ -186,7 +186,7 @@ async function main() {
     console.log('  submit [--id ID] [--event-id ID --payload JSON]');
     console.log('         [--invoice-id ID --customer-id ID --amount-cents N] [--source ID --pages N]');
     console.log('  schedule --id ID [--source ID --pages N --interval-ms N --first-due-ms N]');
-    console.log('  work [--once] | signal --id ID [--decline] | inspect --id ID [--schedule]');
+    console.log('  work [--once] | signal --id ID [--decline] | inspect --id ID [--schedule] [--internal]');
     console.log('Set SERVICE_URL for submit/schedule. Use DEOOS_MODE=server with ENGINE_URL,');
     console.log('or DEOOS_MODE=library with DEOOS_STORAGE_BUCKET, AWS_REGION, and EXECUTION_PREFIX.');
     return;
@@ -196,7 +196,7 @@ async function main() {
     'invoice-id': { type: 'string' }, 'customer-id': { type: 'string' }, 'amount-cents': { type: 'string' },
     source: { type: 'string' }, pages: { type: 'string' }, 'interval-ms': { type: 'string' },
     'first-due-ms': { type: 'string' }, once: { type: 'boolean' }, decline: { type: 'boolean' },
-    schedule: { type: 'boolean' },
+    schedule: { type: 'boolean' }, internal: { type: 'boolean' },
   }, allowPositionals: true });
   const [action, kind] = positionals;
   if (!['submit', 'schedule', 'work', 'signal', 'inspect'].includes(action)
@@ -225,8 +225,9 @@ async function main() {
   const client = createClient();
   let result;
   if (action === 'submit') {
-    result = await client.submit(validId(values.id ?? kind + '-' + randomUUID().replaceAll('-', '')),
-      caseHandlers[kind], inputs, 3, 1000);
+    const id = validId(values.id ?? kind + '-' + randomUUID().replaceAll('-', ''));
+    await client.submit(id, caseHandlers[kind], inputs, 3, 1000);
+    result = await client.view(id);
   } else if (action === 'schedule') {
     result = await client.schedule(validId(values.id), caseHandlers.import, inputs,
       parseInteger(values['interval-ms'] ?? '86400000', 'interval_ms', 1), {
@@ -235,9 +236,13 @@ async function main() {
         }), missed: 'latest', overlap: 'skip', max_attempts: 3, retry_ms: 1000,
       });
   } else if (action === 'signal') {
-    result = await client.signal(validId(values.id), 'approval', { approved: !values.decline });
+    const id = validId(values.id);
+    await client.signal(id, 'approval', { approved: !values.decline });
+    result = await client.view(id);
   } else if (action === 'inspect') {
-    result = await (values.schedule ? client.inspectSchedule(validId(values.id)) : client.inspect(validId(values.id)));
+    const id = validId(values.id);
+    result = await (values.schedule ? client.inspectSchedule(id)
+      : values.internal ? client.inspect(id) : client.view(id));
   } else if (values.once) {
     result = { worked: await client.runOnce(handlers) };
   } else {

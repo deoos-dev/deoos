@@ -1,4 +1,8 @@
-"""No engine process or localhost configuration: Rust runs in this Python process."""
+"""Library mode runs the Rust engine in this process.
+
+Set DEOOS_STORAGE_BUCKET (or AWS_BUCKET) and storage credentials. This is not
+zero-config. The filesystem provider is macOS ARM64 with local APFS only.
+"""
 import sys,uuid
 from deoos import Client
 engine=Client()
@@ -7,5 +11,5 @@ def greet(ctx,inputs):
 task_id=sys.argv[1] if len(sys.argv)>1 else 'greet-'+uuid.uuid4().hex
 engine.submit(task_id,'greet',{'name':'World'})
 engine.run_once({'greet':greet})
-print(engine.request('/tasks/'+task_id)['output'])
+print(engine.view(task_id)['output'])
 engine.close()

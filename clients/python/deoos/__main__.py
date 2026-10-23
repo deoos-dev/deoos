@@ -1,10 +1,9 @@
 """Small operator CLI: python -m deoos --help."""
 import argparse
 import json
-import os
 import sys
 
-from . import Client
+from . import client_from_environment
 
 
 def task_view(state):
@@ -51,11 +50,9 @@ def main():
     if args.command == "mcp":
         from .mcp import serve
         return serve(allow_actions=args.allow_actions)
-    url = os.environ.get("ENGINE_URL")
-    token = os.environ.get("ENGINE_TOKEN")
     client = None
     try:
-        client = Client.remote(url, token) if url else Client(token=token)
+        client = client_from_environment()
         if args.command == "info":
             result = client.request("/info")
         elif args.command == "list":

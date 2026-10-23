@@ -1,3 +1,5 @@
+// Run this file from the Node project that contains node_modules/deoos.
+// Node resolves `deoos` from this file's location, not from NODE_PATH.
 import {Client} from 'deoos';
 import {randomUUID} from 'node:crypto';
 const provider=process.env.DEOOS_STORAGE_PROVIDER??'s3';
@@ -8,4 +10,4 @@ const engine=new Client({...storage,prefix:process.env.EXECUTION_PREFIX??'deoos'
 const id=process.argv[2]??`greet-${randomUUID()}`;
 await engine.submit(id,'greet',{name:'World'});
 await engine.runOnce({greet:async(ctx,inputs)=>ctx.step('greeting',()=>`Hello, ${inputs.name}!`)});
-console.log((await engine.request(`/tasks/${id}`)).output);
+console.log((await engine.view(id)).output);

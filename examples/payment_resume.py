@@ -1,4 +1,6 @@
-"""Charge a fake payment API, await approval, and fulfil using stable request keys.
+"""Older payment harness. examples/charge.py is the example to run.
+
+Charge a fake payment API, await approval, and fulfil using stable request keys.
 
 Run with HANDLERS and payment_inputs(service_url). The API must enforce request
 idempotency; saved charge checkpoints avoid calling it again after a resume.
