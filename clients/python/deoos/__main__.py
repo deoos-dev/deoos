@@ -14,6 +14,13 @@ def task_view(state):
                 attempts=state["attempts"], completed_steps=sorted(state["steps"]))
 
 
+def json_arg(text, label):
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        raise ValueError(f"{label} must be JSON") from None
+
+
 def main():
     parser = argparse.ArgumentParser(prog="python -m deoos")
     commands = parser.add_subparsers(dest="command", required=True)
@@ -47,6 +54,19 @@ def main():
     schedule.add_argument("action", choices=("inspect", "pause", "resume"))
     schedule.add_argument("id")
 
+    submit = commands.add_parser("submit", help="start a workflow")
+    submit.add_argument("id")
+    submit.add_argument("handler")
+    submit.add_argument("inputs", nargs="?", default="{}", help="JSON object (default {})")
+    submit.add_argument("--max-attempts", type=int, default=3)
+    submit.add_argument("--retry-ms", type=int, default=0)
+
+    signal = commands.add_parser("signal", help="send a signal to a running workflow")
+    signal.add_argument("id")
+    signal.add_argument("name")
+    signal.add_argument("value", help="JSON value")
+    signal.add_argument("--operation-id", help="stable ID; reuse it to replay this signal")
+
     args = parser.parse_args()
     if args.command == "mcp":
         from .mcp import serve
@@ -73,6 +93,15 @@ def main():
             result = task_view(client.retry(args.id, revision, args.operation_id))
         elif args.command == "cancel":
             result = task_view(client.cancel(args.id))
+        elif args.command == "submit":
+            inputs = json_arg(args.inputs, "inputs")
+            if not isinstance(inputs, dict):
+                raise ValueError("inputs must be a JSON object")
+            result = task_view(client.submit(
+                args.id, args.handler, inputs, args.max_attempts, args.retry_ms))
+        elif args.command == "signal":
+            result = task_view(client.signal(
+                args.id, args.name, json_arg(args.value, "value"), args.operation_id))
         elif args.action == "inspect":
             result = client.inspect_schedule(args.id)
         elif args.action == "pause":
@@ -98,7 +127,11 @@ def main():
         else:
             print(json.dumps(result, indent=2, sort_keys=True))
     except Exception as error:
-        print(str(error), file=sys.stderr)
+        url = getattr(client, "url", None)
+        if url and isinstance(error, OSError):
+            print(f"cannot reach engine at {url}; run make dev", file=sys.stderr)
+        else:
+            print(str(error), file=sys.stderr)
         return 1
     finally:
         if client is not None:

@@ -1,6 +1,6 @@
 PYTHON ?= python3
 TEST_PYTHON ?= tests/.venv/bin/python
-.PHONY: build setup test-local test-aws test-cluster test-examples package test-package test-filesystem clean-local
+.PHONY: build setup test-local test-aws test-cluster test-examples package test-package test-filesystem clean-local dev dev-down test-dev
 
 build:
 	$(PYTHON) packaging/build_package.py --build-only
@@ -40,3 +40,12 @@ test-filesystem: package
 clean-local:
 	docker compose down -v
 	docker compose -p durable-cluster -f tests/compose.cluster.yaml down -v
+
+dev:
+	@PYTHON="$(PYTHON)" ./scripts/dev.sh up
+
+dev-down:
+	@PYTHON="$(PYTHON)" ./scripts/dev.sh down
+
+test-dev:
+	$(PYTHON) tests/dev_cli.py
