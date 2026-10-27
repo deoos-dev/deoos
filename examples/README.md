@@ -58,6 +58,16 @@ The fake API retains idempotency keys for a configurable window (24 hours by def
 
 An uncommitted charge resumed after key expiry requires checking the payment provider's transaction records before sending another charge. This example demonstrates saved-result replay and retries within the key window; it does not implement that reconciliation.
 
+### Counting House refund
+
+Run:
+
+```sh
+docker compose -p deoos run --build --rm counting-house
+```
+
+A customer refund where the model only proposes the write. `counting_house/refund.py` re-checks a local billing ledger, waits for an approval signal, then posts the refund to that ledger, a CRM file, and a notification log. Each write uses an idempotency key and is read back. A refusal from the notification step compensates the ledger and the CRM. The demo kills the worker after the ledger write and before its checkpoint, resumes, and checks that the refund was posted once. It also rejects one case and writes `evals.jsonl` (proposal, approval, outcome, correctness label). The legacy systems are JSON files; the proposer is a deterministic stub. No API key is used. Details are in `counting_house/README.md`.
+
 ### Other HTTP integrations
 
 | Use case | Durable behavior | Integration boundary |

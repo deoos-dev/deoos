@@ -31,5 +31,8 @@ services:
   document-index:
     <<: *demo
     entrypoint: [deoos-demo, document-index]
+  counting-house:
+    <<: *demo
+    entrypoint: [deoos-demo, counting-house]
 volumes:
   rustfs-data:

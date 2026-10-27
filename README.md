@@ -20,7 +20,7 @@ docker compose -p deoos run --build --rm hacker-news
 
 Docker is the only prerequisite. The Linux container installs the released SDKs, starts a worker against local RustFS, stops it after 20 items, then resumes and checks the saved DuckDB data. It works on x86_64 and arm64 Docker hosts. Results stay in `outputs/hacker-news/`; RustFS stays running.
 
-Try `devto-etl` or `payment-resume` in the same command for CSV ingestion or payment recovery. See [the examples](examples/README.md) for the workflow code and native execution options.
+Try `devto-etl`, `payment-resume`, or `counting-house` in the same command for CSV ingestion, payment recovery, or a refund saga whose model only proposes the change. See [the examples](examples/README.md) for the workflow code and native execution options.
 
 From the source repository, try `document-index` to turn text files into a searchable index and verify recovery after worker crashes.
 
