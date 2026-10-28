@@ -1,3 +1,4 @@
+// Fresh-install worker for tests/package_smoke.py. Rust runs in this process.
 import {Client} from 'deoos';
 import {randomUUID} from 'node:crypto';
 const provider=process.env.DEOOS_STORAGE_PROVIDER??'s3';

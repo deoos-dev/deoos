@@ -12,6 +12,7 @@ import collections
 import copy
 import datetime
 import hashlib
+import http.server
 import json
 import math
 import os
@@ -22,6 +23,7 @@ import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import urllib.request
 import uuid
@@ -30,11 +32,129 @@ import boto3
 from botocore.config import Config
 from botocore.exceptions import ClientError
 from discovery_probe import CountingProxy
-from use_cases import IntegrationFixture, stop, wait
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "clients/python"))
 from deoos import Client
+
+
+def wait(predicate, timeout=15):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        value = predicate()
+        if value:
+            return value
+        time.sleep(.05)
+    raise AssertionError("condition did not become true before timeout")
+
+
+def stop(process):
+    if process is not None and process.poll() is None:
+        process.kill()
+        process.wait(timeout=10)
+
+class IntegrationFixture:
+    """Record real HTTP requests and deduplicate effects before sending responses."""
+    def __init__(self, port=0):
+        self.lock = threading.Lock()
+        self.requests = []
+        self.effects = {}
+        self.fail_once = set()
+        self.hold_event = None
+        self.hold_events = set()
+        self.effect_committed = threading.Event()
+        self.release_response = threading.Event()
+        fixture = self
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+
+            def reply(self, status, value):
+                payload = json.dumps(value).encode()
+                self.send_response(status)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                try:
+                    self.wfile.write(payload)
+                except (BrokenPipeError, ConnectionResetError):
+                    pass  # The crash test deliberately kills the requesting worker.
+
+            def do_GET(self):
+                if self.path == "/health":
+                    self.reply(200, {"status": "ok", "integration": "simulated"})
+                    return
+                parts = self.path.strip("/").split("/")
+                if len(parts) != 4 or parts[0] != "imports" or parts[2] != "pages":
+                    self.reply(404, {"error": "unknown fixture route"})
+                    return
+                page = int(parts[3])
+                with fixture.lock:
+                    fixture.requests.append({"path": self.path, "key": None})
+                self.reply(200, {"records": [{"source": parts[1], "page": page,
+                                               "value": page * 10}]})
+
+            def do_POST(self):
+                body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+                key = self.headers.get("Idempotency-Key")
+                identifier = body.get("event_id", body.get("invoice_id", body.get("source")))
+                with fixture.lock:
+                    fixture.requests.append({"path": self.path, "key": key, "body": body})
+                    transient = identifier in fixture.fail_once
+                    if transient:
+                        fixture.fail_once.remove(identifier)
+                    if not key:
+                        response = (400, {"error": "Idempotency-Key is required"})
+                    elif transient:
+                        response = (503, {"error": "simulated transient outage"})
+                    else:
+                        identity = (self.path, key)
+                        prior = fixture.effects.get(identity)
+                        if prior is not None and prior["body"] != body:
+                            response = (409, {"error": "key reused for changed request"})
+                        else:
+                            if prior is None:
+                                if self.path == "/webhooks":
+                                    result = {"event_id": body["event_id"], "status": "delivered"}
+                                elif self.path == "/invoices":
+                                    result = {"invoice_id": body["invoice_id"], "status": "issued"}
+                                elif self.path == "/batches":
+                                    result = {"source": body["source"], "record_count": len(body["records"])}
+                                else:
+                                    response = (404, {"error": "unknown fixture route"})
+                                    result = None
+                                if result is not None:
+                                    prior = fixture.effects[identity] = {"body": body, "result": result}
+                            if prior is not None:
+                                response = (200, prior["result"])
+                    hold = (identifier == fixture.hold_event or identifier in fixture.hold_events) and not transient
+                if hold:
+                    fixture.effect_committed.set()
+                    fixture.release_response.wait(20)
+                self.reply(*response)
+
+        self.server = http.server.ThreadingHTTPServer(("127.0.0.1", port), Handler)
+        self.server.daemon_threads = True
+        self.url = f"http://127.0.0.1:{self.server.server_port}"
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.thread.start()
+
+    def requests_for(self, identifier):
+        with self.lock:
+            return [request.copy() for request in self.requests
+                    if identifier in request.get("body", {}).values()]
+
+    def effects_for(self, identifier):
+        with self.lock:
+            return [effect for effect in self.effects.values()
+                    if identifier in effect["body"].values()]
+
+    def close(self):
+        self.release_response.set()
+        self.server.shutdown()
+        self.server.server_close()
+        self.thread.join(timeout=10)
 
 
 def seed_completed_history(s3, bucket, prefix, client, count):
@@ -443,8 +563,8 @@ def main():
         parser.error("tasks1-1000, duration1-300 seconds, inspect-interval0.1-10 seconds, workers1-16 required")
     server_binary = pathlib.Path(os.environ.get("ENGINE_BINARY", ROOT / "engine/target/release" / ("deoos-server.exe" if os.name == "nt" else "deoos-server")))
     native_name = {"Darwin": "libdeoos_engine.dylib", "Linux": "libdeoos_engine.so", "Windows": "deoos_engine.dll"}[platform.system()]
-    files = [pathlib.Path(__file__), ROOT / "tests/use_cases.py", ROOT / "tests/discovery_probe.py",
-             ROOT / "examples/use_cases.py", ROOT / "examples/use_cases.mjs", server_binary,
+    files = [pathlib.Path(__file__), ROOT / "tests/discovery_probe.py",
+             ROOT / "tests/fixtures/use_cases.py", ROOT / "tests/fixtures/use_cases.mjs", server_binary,
              pathlib.Path(os.environ.get("DEOOS_NATIVE_LIBRARY", ROOT / "clients/python/deoos/native" / native_name)),
              pathlib.Path(os.environ.get("DEOOS_NODE_LIBRARY", ROOT / "clients/typescript/dist/native/deoos_node.node")),
              ROOT / "clients/python/deoos/__init__.py", ROOT / "clients/typescript/dist/index.js",
@@ -491,7 +611,7 @@ def main():
         with tempfile.TemporaryDirectory(prefix="deoos-load-") as directory:
             work = pathlib.Path(directory)
             for name in ("use_cases.py", "use_cases.mjs"):
-                shutil.copyfile(ROOT / "examples" / name, work / name)
+                shutil.copyfile(ROOT / "tests/fixtures" / name, work / name)
             (work / "node_modules").mkdir()
             (work / "node_modules/deoos").symlink_to(ROOT / "clients/typescript", target_is_directory=True)
             for mode in args.mode or ["library", "server"]:

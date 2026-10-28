@@ -1,4 +1,4 @@
-"""Cross-language durable order demo; no payment or external service is called."""
+"""Fresh-install order worker for tests/package_smoke.py. No payment or external service is called."""
 import argparse
 import json
 import os

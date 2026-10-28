@@ -72,16 +72,10 @@ def verify_target(outputs: pathlib.Path, evidence: pathlib.Path, version: str,
         sums[path] = checksum
     hashes = {path: digest(data) for path, data in files.items() if path != "SHA256SUMS"}
     require(sums == hashes, f"{target}: incomplete or incorrect payload checksums")
-    for path in ("LICENSE", "README.md", "compose.yaml",
-                 "examples/Dockerfile", "examples/.dockerignore", "examples/docker_runner.sh",
-                 "examples/hacker-news", "examples/hacker_news.py", "examples/hacker_news.mjs", "examples/hacker_news_demo.py",
-                 "examples/README.md", "examples/library_python.py", "examples/library_typescript.mjs",
-                 "examples/server_python.py", "examples/server_typescript.mjs",
-                 "examples/devto-etl", "examples/devto_etl.py", "examples/devto_etl.mjs", "examples/devto_etl_demo.py",
-                 "examples/payment-resume", "examples/payment_resume.py",
-                 "examples/payment_resume.mjs", "examples/payment_resume_demo.py",
-                 "examples/document_index.py", "examples/document_index.mjs", "examples/document_index_demo.py"):
+    for path in ("LICENSE", "README.md", "compose.yaml"):
         require(bool(files.get(path)), f"{target}: missing {path}")
+    require(not any(path.startswith("examples/") for path in files),
+            f"{target}: release still contains runnable examples")
     require(b"Apache License" in files["LICENSE"], f"{target}: missing Apache license text")
     require(not any(path.endswith((".rs", "Cargo.toml", "Cargo.lock")) for path in files),
             f"{target}: unexpected Rust source in distribution")

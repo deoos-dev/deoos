@@ -2,6 +2,10 @@ name: Build and test
 
 on:
   workflow_dispatch:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
 
 permissions:
   contents: read
@@ -51,7 +55,7 @@ jobs:
         run: |
           npm ci --prefix clients/typescript
           npm run build --prefix clients/typescript
-          python -m compileall -q clients/python packaging tests examples
+          python -m compileall -q clients/python packaging tests
       - name: Build native artifacts for behavioral tests
         timeout-minutes: 30
         run: |
@@ -79,8 +83,7 @@ jobs:
               raise RuntimeError('RustFS did not become ready')
           PYTHON
           python tests/two_modes.py rustfs
-          python tests/use_cases.py
-          python tests/payment_resume.py
+          python tests/storage_checks.py
           python tests/discovery_contract.py
           python tests/active_discovery_contract.py
           python packaging/build_package.py --package-only

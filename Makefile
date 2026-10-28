@@ -1,6 +1,6 @@
 PYTHON ?= python3
 TEST_PYTHON ?= tests/.venv/bin/python
-.PHONY: build setup test-local test-aws test-cluster test-examples package test-package test-filesystem clean-local
+.PHONY: build setup test-local test-aws test-cluster package test-package test-filesystem clean-local
 
 build:
 	$(PYTHON) packaging/build_package.py --build-only
@@ -12,14 +12,10 @@ setup: build
 test-local: build
 	docker compose up -d
 	ENGINE_BINARY="$(CURDIR)/engine/target/release/deoos-server" $(TEST_PYTHON) tests/two_modes.py rustfs
+	ENGINE_BINARY="$(CURDIR)/engine/target/release/deoos-server" $(TEST_PYTHON) tests/storage_checks.py
 
 test-aws: build
 	ENGINE_BINARY="$(CURDIR)/engine/target/release/deoos-server" $(TEST_PYTHON) tests/two_modes.py aws
-
-test-examples: build
-	docker compose up -d
-	ENGINE_BINARY="$(CURDIR)/engine/target/release/deoos-server" $(TEST_PYTHON) tests/use_cases.py
-	ENGINE_BINARY="$(CURDIR)/engine/target/release/deoos-server" $(TEST_PYTHON) tests/payment_resume.py
 
 test-cluster: build
 	docker compose -p durable-cluster -f tests/compose.cluster.yaml up -d

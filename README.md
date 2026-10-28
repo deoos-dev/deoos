@@ -12,17 +12,13 @@ Download the package for your platform from [Releases](https://github.com/deoos-
 
 ## Quick start
 
-From the repository or an extracted release, run:
+Runnable examples are in [deoos-examples](https://github.com/deoos-dev/deoos-examples). From a clone of that repository:
 
 ```sh
-docker compose -p deoos run --build --rm hacker-news
+docker compose run --build --rm hacker-news
 ```
 
-Docker is the only prerequisite. The Linux container installs the released SDKs, starts a worker against local RustFS, stops it after 20 items, then resumes and checks the saved DuckDB data. It works on x86_64 and arm64 Docker hosts. Results stay in `outputs/hacker-news/`; RustFS stays running.
-
-Try `devto-etl` or `payment-resume` in the same command for CSV ingestion or payment recovery. See [the examples](examples/README.md) for the workflow code and native execution options.
-
-From the source repository, try `document-index` to turn text files into a searchable index and verify recovery after worker crashes.
+Docker is the only prerequisite. The container installs deoos, starts a worker against local RustFS, and checks that a saved result survives a stopped worker.
 
 For your own application, install the SDK from the latest release. These snippets use library mode with your bucket and cloud credentials.
 
@@ -57,7 +53,7 @@ The task ID identifies the work. Reusing it with the same definition returns the
 
 ## Library mode
 
-The Rust engine runs inside your Python or Node worker. Each worker holds storage credentials and uses the same bucket and execution prefix. No execution server is needed. In the examples, `DEOOS_MODE=library` selects library mode.
+The Rust engine runs inside your Python or Node worker. Each worker holds storage credentials and uses the same bucket and execution prefix. No execution server is needed. `DEOOS_MODE=library` selects library mode.
 
 Run cloud workers near their object store, or self-hosted workers beside RustFS. For a local trial on Mac Apple Silicon, an experimental filesystem adapter accepts `provider="filesystem"` and a private local APFS directory.
 
@@ -99,7 +95,7 @@ python -m deoos inspect greeting-001 --internal
 python -m deoos info
 ```
 
-`info` shows engine health. In server mode it reads the running server’s counters; library-mode CLI commands create a fresh engine. Counters belong to each engine instance and reset when it is recreated. The CLI uses your storage configuration in library mode, or `ENGINE_URL` and `ENGINE_TOKEN` in server mode. See the [paired Python and TypeScript examples](examples/README.md) for runnable workflows.
+`info` shows engine health. In server mode it reads the running server’s counters; library-mode CLI commands create a fresh engine. Counters belong to each engine instance and reset when it is recreated. The CLI uses your storage configuration in library mode, or `ENGINE_URL` and `ENGINE_TOKEN` in server mode. Runnable workflows for both SDKs are in [deoos-examples](https://github.com/deoos-dev/deoos-examples).
 
 ## Idempotency across long pauses
 
@@ -108,7 +104,7 @@ Inside a step, pass `ctx.idempotency_key("charge")` / `ctx.idempotencyKey("charg
 That key stays the same across retries and resumes and covers the gap between the call and its committed result, while the provider retains the key.
 After the provider's key window expires, an unfinished step in that gap needs a reconciliation check before calling again.
 Use globally unique execution IDs when sharing an external account; step keys do not include the bucket or prefix.
-Keep saved workflow state for the full pause. Try the local fake-payment example with `./examples/payment-resume`.
+Keep saved workflow state for the full pause. The payment demo in [deoos-examples](https://github.com/deoos-dev/deoos-examples) replays a saved charge after that window: `docker compose run --build --rm payment-resume`.
 
 ## Guarantees and limits
 

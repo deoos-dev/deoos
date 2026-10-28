@@ -1,7 +1,0 @@
-#!/bin/sh
-set -eu
-
-root=$(cd "$(dirname "$0")/.." && pwd)
-command -v docker >/dev/null || { echo 'Install Docker first.' >&2; exit 1; }
-docker info >/dev/null 2>&1 || { echo 'Start Docker, then run this command again.' >&2; exit 1; }
-exec docker compose -p deoos -f "$root/compose.yaml" run --build --rm devto-etl "$@"
