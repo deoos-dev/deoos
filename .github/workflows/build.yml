@@ -108,7 +108,9 @@ jobs:
 
   packages:
     needs: checks
-    if: github.event_name != 'pull_request'
+    # DeoosCiActions authorizes workflow_dispatch OIDC tokens. A push to main
+    # is rejected with sts:AssumeRoleWithWebIdentity, so this matrix stays manual.
+    if: github.event_name == 'workflow_dispatch'
     timeout-minutes: 90
     permissions:
       contents: read
