@@ -1,4 +1,4 @@
-"""No engine process or localhost configuration: Rust runs in this Python process."""
+"""Fresh-install worker for tests/package_smoke.py. Rust runs in this Python process."""
 import sys,uuid
 from deoos import Client
 engine=Client()

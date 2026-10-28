@@ -1,3 +1,4 @@
+"""Fresh-install worker for tests/package_smoke.py. Talks to a running deoos-server."""
 import os,sys,uuid
 from deoos import Client
 engine=Client.remote(os.environ['ENGINE_URL'],token=os.environ.get('ENGINE_TOKEN'))

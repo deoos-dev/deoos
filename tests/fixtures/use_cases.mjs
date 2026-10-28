@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Runnable business workflows against the local example service, not live integrations.
+// Webhook, invoice, and import workers for tests/load.py. Not a live integration.
 import { randomUUID } from 'node:crypto';
 import { realpathSync } from 'node:fs';
 import { parseArgs } from 'node:util';

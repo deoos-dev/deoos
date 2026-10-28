@@ -17,6 +17,10 @@ import zipfile
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 MAX_SAFE_INTEGER = 9_007_199_254_740_991
+WORKFLOW_FIXTURES = (
+    "workflow_python.py", "workflow_typescript.mjs", "library_python.py",
+    "library_typescript.mjs", "server_python.py", "server_typescript.mjs",
+)
 
 
 def command(args, *, cwd=None, env=None, timeout=90, check=True):
@@ -743,12 +747,12 @@ def main():
         native_names = [pathlib.PurePosixPath(name).name for name in archive.namelist()
                         if "/native/" in name]
         assert native_names == [python_native_name], native_names
-    examples = package / "examples"
+    # The release ships the engine and clients. These workers exercise that install.
+    fixtures = ROOT / "tests/fixtures/release"
     server_binary = package / "bin" / ("deoos-server.exe" if os.name == "nt" else "deoos-server")
     server_version = command([str(server_binary), "--version"], cwd=package).stdout.strip()
-    for name in ("workflow_python.py", "workflow_typescript.mjs", "library_python.py",
-                 "library_typescript.mjs", "server_python.py", "server_typescript.mjs"):
-        assert (examples / name).is_file(), f"missing packaged workflow example: {name}"
+    for name in WORKFLOW_FIXTURES:
+        assert (fixtures / name).is_file(), f"missing workflow fixture: {name}"
 
     bucket = None if args.backend == "filesystem" else (
         os.environ.get("DEOOS_TEST_BUCKET_PREFIX", "deoos-smoke-") + uuid.uuid4().hex[:20])
@@ -838,13 +842,11 @@ def main():
                                    "--no-fund", str(npm_package)]), cwd=work, timeout=120)
             work_examples = work / "examples"
             work_examples.mkdir()
-            for example in examples.iterdir():
-                if example.is_file():
-                    shutil.copy2(example, work_examples / example.name)
+            for name in WORKFLOW_FIXTURES:
+                shutil.copy2(fixtures / name, work_examples / name)
             installed_hashes = installed_artifacts(python, work / "node_modules", env)
             report["installed_hashes"] = installed_hashes
-            report["example_hashes"] = {path.name: sha256(path) for path in examples.iterdir()
-                                        if path.is_file()}
+            report["workflow_fixture_hashes"] = {name: sha256(fixtures / name) for name in WORKFLOW_FIXTURES}
             try:
                 report["runtime"] = {}
                 for mode in ("library", "server"):
