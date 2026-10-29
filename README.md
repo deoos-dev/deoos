@@ -1,5 +1,7 @@
 # DEOOS
 
+[![Build and test](https://github.com/deoos-dev/deoos/actions/workflows/build.yml/badge.svg)](https://github.com/deoos-dev/deoos/actions/workflows/build.yml)
+
 Durable execution on object storage.
 
 Write ordinary functions that recover from failures. DEOOS saves completed steps and retries unfinished work, keeping workflow state in object storage—S3, Azure Blob, GCS, R2, or self-hosted RustFS. No database to manage.
@@ -8,7 +10,87 @@ Write ordinary functions that recover from failures. DEOOS saves completed steps
 
 ## Install
 
-Download the package for your platform from [Releases](https://github.com/deoos-dev/deoos/releases). Python 3.10+ and Node 22+ are required for their respective SDKs; no Rust compiler is needed. Choose the archive matching your operating system and CPU. Release notes list the available builds.
+Release [0.7.2](https://github.com/deoos-dev/deoos/releases/tag/0.7.2) is the current published build. Python 3.10+ and Node 22+ are required for the SDKs. A Rust compiler is not required.
+
+`deoos` 0.7.2 is published as GitHub release archives. PyPI has no `deoos` package, and the npm registry has no `deoos` package. `pip install deoos` and `npm install deoos` do not install this project. Install the wheel and the Node tarball from the archive that matches your operating system and CPU.
+
+| Archive | Python wheel | Server | Node package |
+| --- | --- | --- | --- |
+| `deoos-0.7.2-linux-x64.tar.gz` | `deoos-0.7.2-py3-none-manylinux_2_28_x86_64.whl` | `bin/deoos-server` | `node/deoos-0.7.2.tgz` (`os=linux`, `cpu=x64`) |
+| `deoos-0.7.2-linux-arm64.tar.gz` | `deoos-0.7.2-py3-none-manylinux_2_28_aarch64.whl` | `bin/deoos-server` | `node/deoos-0.7.2.tgz` (`os=linux`, `cpu=arm64`) |
+| `deoos-0.7.2-macos-arm64.tar.gz` | `deoos-0.7.2-py3-none-macosx_11_0_arm64.whl` | `bin/deoos-server` | `node/deoos-0.7.2.tgz` (`os=darwin`, `cpu=arm64`) |
+| `deoos-0.7.2-macos-x64.tar.gz` | `deoos-0.7.2-py3-none-macosx_11_0_x86_64.whl` | `bin/deoos-server` | `node/deoos-0.7.2.tgz` (`os=darwin`, `cpu=x64`) |
+| `deoos-0.7.2-windows-x64.tar.gz` | `deoos-0.7.2-py3-none-win_amd64.whl` | `bin/deoos-server.exe` | `node/deoos-0.7.2.tgz` (`os=win32`, `cpu=x64`) |
+
+Linux packages need glibc 2.28 or newer. Release 0.7.2 has no Windows arm64 archive. Each Node tarball is built for one platform, and npm rejects a tarball from another operating system or CPU. The archive also contains `LICENSE`, `README.md`, `compose.yaml`, `SHA256SUMS`, and an `examples/` directory. Checksums for the archives are in [`SHA256SUMS`](https://github.com/deoos-dev/deoos/releases/download/0.7.2/SHA256SUMS).
+
+### Linux and macOS
+
+```sh
+set -euo pipefail
+VERSION=0.7.2
+BASE="https://github.com/deoos-dev/deoos/releases/download/${VERSION}"
+case "$(uname -s)-$(uname -m)" in
+  Linux-x86_64) target=linux-x64 ;;
+  Linux-aarch64|Linux-arm64) target=linux-arm64 ;;
+  Darwin-arm64) target=macos-arm64 ;;
+  Darwin-x86_64) target=macos-x64 ;;
+  *) echo "No ${VERSION} build for $(uname -s) $(uname -m). Shipped: linux-x64, linux-arm64, macos-arm64, macos-x64, windows-x64." >&2; exit 1 ;;
+esac
+archive="deoos-${VERSION}-${target}.tar.gz"
+curl -fL --retry 3 -o "$archive" "$BASE/$archive"
+curl -fsSL --retry 3 -o SHA256SUMS "$BASE/SHA256SUMS"
+if command -v sha256sum >/dev/null 2>&1; then
+  grep "  ${archive}\$" SHA256SUMS | sha256sum -c -
+else
+  grep "  ${archive}\$" SHA256SUMS | shasum -a 256 -c -
+fi
+rm -rf "deoos-${VERSION}-${target}"
+tar -xzf "$archive"
+python3 -m venv .venv
+. .venv/bin/activate
+python -m pip install --disable-pip-version-check "deoos-${VERSION}-${target}/python/"*.whl
+"deoos-${VERSION}-${target}/bin/deoos-server" --version
+python -m deoos --help
+mkdir -p deoos-node-app
+(
+  cd deoos-node-app
+  npm init -y
+  npm install "$PWD/../deoos-${VERSION}-${target}/node/deoos-0.7.2.tgz"
+  node --input-type=module -e "import { Client } from 'deoos'; console.log(typeof Client)"
+)
+```
+
+### Windows x64 (PowerShell)
+
+```powershell
+$Version = "0.7.2"
+$Target = "windows-x64"
+$Archive = "deoos-$Version-$Target.tar.gz"
+$Base = "https://github.com/deoos-dev/deoos/releases/download/$Version"
+$ErrorActionPreference = "Stop"
+Invoke-WebRequest -Uri "$Base/$Archive" -OutFile $Archive
+Invoke-WebRequest -Uri "$Base/SHA256SUMS" -OutFile SHA256SUMS
+$line = Select-String -Path SHA256SUMS -Pattern ([regex]::Escape($Archive)) | Select-Object -First 1
+if (-not $line) { throw "SHA256SUMS has no entry for $Archive" }
+$expected = ($line.Line -split '\s+')[0].ToLower()
+$actual = (Get-FileHash -Algorithm SHA256 -Path $Archive).Hash.ToLower()
+if ($actual -ne $expected) { throw "checksum mismatch for $Archive" }
+if (Test-Path "deoos-$Version-$Target") { Remove-Item -Recurse -Force "deoos-$Version-$Target" }
+tar -xzf $Archive
+python -m venv .venv
+.\.venv\Scripts\python -m pip install --disable-pip-version-check (Get-Item "deoos-$Version-$Target\python\*.whl").FullName
+& ".\deoos-$Version-$Target\bin\deoos-server.exe" --version
+.\.venv\Scripts\python -m deoos --help
+New-Item -ItemType Directory -Force deoos-node-app | Out-Null
+Push-Location deoos-node-app
+npm init -y
+npm install (Resolve-Path "..\deoos-$Version-$Target\node\deoos-0.7.2.tgz")
+node --input-type=module -e "import { Client } from 'deoos'; console.log(typeof Client)"
+Pop-Location
+```
+
+The 0.7.2 wheel's CLI commands are `list`, `info`, `mcp`, `inspect`, `history`, `summary`, `explain`, `retry`, `cancel`, and `schedule`. That wheel selects server mode when `ENGINE_URL` is set and library mode when it is absent. It does not read `DEOOS_MODE`. `submit` and `signal` are in this repository's CLI, described under Develop.
 
 ## Quick start
 
@@ -20,7 +102,7 @@ docker compose run --build --rm hacker-news
 
 Docker is the only prerequisite. The container installs deoos, starts a worker against local RustFS, and checks that a saved result survives a stopped worker.
 
-For your own application, install the SDK from the latest release. These snippets use library mode with your bucket and cloud credentials.
+For your own application, use the wheel or Node package from Install. These snippets use library mode with your bucket and cloud credentials.
 
 ### Python
 
@@ -95,7 +177,7 @@ python -m deoos inspect greeting-001 --internal
 python -m deoos info
 ```
 
-`info` shows engine health. In server mode it reads the running server’s counters; library-mode CLI commands create a fresh engine. Counters belong to each engine instance and reset when it is recreated. The CLI uses your storage configuration in library mode, or `ENGINE_URL` and `ENGINE_TOKEN` in server mode. Runnable workflows for both SDKs are in [deoos-examples](https://github.com/deoos-dev/deoos-examples).
+`info` shows engine health. In server mode it reads the running server’s counters; library-mode CLI commands create a fresh engine. Counters belong to each engine instance and reset when it is recreated. This repository's CLI reads `DEOOS_MODE`. `library` uses in-process storage and ignores `ENGINE_URL`. `server` requires `ENGINE_URL`. With `DEOOS_MODE` unset, `ENGINE_URL` selects server mode and its absence selects library mode. Runnable workflows for both SDKs are in [deoos-examples](https://github.com/deoos-dev/deoos-examples).
 
 ## Idempotency across long pauses
 
@@ -114,6 +196,26 @@ Keep saved workflow state for the full pause. The payment demo in [deoos-example
 - Object-storage requests and retries are bounded per engine, with separate capacity for lease renewals. Overload can return a retryable error; prolonged storage failures can still cause lease expiry. Keep workflow inputs and outputs small; store large datasets separately and pass references.
 - There is no production HA, tenant isolation, garbage collection, or application throughput guarantee. There is no backward compatibility or automatic migration. Keep engine and SDK versions matched.
 - Retain task state and checkpoint objects while an execution prefix is writable. Stop all writers before retiring a prefix; do not delete live workflow state by age.
+
+## Develop
+
+From a clone of this repository, with Docker and Rust:
+
+```sh
+make dev
+```
+
+`make dev` starts RustFS from `compose.yaml`, creates the `deoos-dev` bucket, builds `deoos-server`, and listens on `127.0.0.1:7331`. Stdout is the environment to export. The same lines are written to `outputs/dev.env`. `make dev-down` stops the server and RustFS and keeps the volume.
+
+```sh
+export ENGINE_URL=http://127.0.0.1:7331
+export PYTHONPATH="$PWD/clients/python"
+python -m deoos info
+python -m deoos submit TASK_ID HANDLER '{"key":"value"}'
+python -m deoos signal TASK_ID SIGNAL_NAME true
+```
+
+`submit` and `signal` belong to this checkout. A refused connection prints `cannot reach engine at <url>; run make dev`. `AGENTS.md` is the kill-and-resume check for this server. `make test-dev` runs that check against the real engine.
 
 ## License
 

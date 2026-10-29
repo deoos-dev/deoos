@@ -12,7 +12,7 @@ import queue
 import sys
 import threading
 
-from . import Client, EngineError, _valid_step
+from . import EngineError, _valid_step, client_from_environment
 
 PROTOCOL_VERSION = "2025-11-25"
 MAX_MESSAGE_BYTES = 1024 * 1024
@@ -78,8 +78,7 @@ def _tool_result(value, error=False):
 
 
 def _client_from_env():
-    url, token = os.environ.get("ENGINE_URL"), os.environ.get("ENGINE_TOKEN")
-    return Client.remote(url, token) if url else Client(token=token)
+    return client_from_environment()
 
 
 class ProtocolError(Exception):

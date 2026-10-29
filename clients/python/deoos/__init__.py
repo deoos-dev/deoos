@@ -452,3 +452,31 @@ class Context:
             return self.client.request(f"/tasks/{self.task['id']}/signals/{name}")
 
         return self._checkpoint(name, {"kind": "wait_signal", "revision": "1", "signal": name}, wait)
+
+
+def client_from_environment():
+    """Open the process-local client used by the CLI and MCP server.
+
+    ``DEOOS_MODE=library`` uses in-process storage and ignores ``ENGINE_URL``.
+    ``DEOOS_MODE=server`` requires ``ENGINE_URL``. When ``DEOOS_MODE`` is unset,
+    ``ENGINE_URL`` selects server mode and its absence selects library mode.
+    """
+    import os
+    import sys
+    mode = os.environ.get("DEOOS_MODE")
+    url = os.environ.get("ENGINE_URL")
+    token = os.environ.get("ENGINE_TOKEN")
+    if mode == "library":
+        if url:
+            print("DEOOS_MODE=library ignores ENGINE_URL. "
+                  "Unset ENGINE_URL, or set DEOOS_MODE=server.", file=sys.stderr)
+        return Client()
+    if mode == "server":
+        if not url:
+            raise ValueError("DEOOS_MODE=server requires ENGINE_URL")
+        return Client.remote(url, token)
+    if mode:
+        raise ValueError("DEOOS_MODE must be 'library' or 'server'")
+    if url:
+        return Client.remote(url, token)
+    return Client(token=token)

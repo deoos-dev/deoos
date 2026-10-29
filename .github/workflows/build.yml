@@ -89,6 +89,7 @@ jobs:
           python packaging/build_package.py --package-only
           python -m pip install outputs/release/deoos-*/python/*.whl
           python tests/mcp_behavior.py --binary engine/target/release/deoos-server --backend rustfs --report outputs/evidence/mcp-rustfs.json
+          python tests/dev_cli.py
       - name: Capture RustFS logs and remove its volume
         if: always()
         run: |
