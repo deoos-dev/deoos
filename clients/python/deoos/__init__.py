@@ -1,4 +1,5 @@
 """Worker SDK: library mode or an explicit server-mode connection."""
+__version__ = "0.7.2"
 import hashlib
 import http.client
 import json
@@ -32,7 +33,10 @@ def _valid_step(name):
             or name in (".", "..")
             or not name.isascii()
             or any(not (char.isalnum() or char in "_.-") for char in name)):
-        raise ValueError("invalid step name")
+        raise ValueError(
+            "invalid name; use 1-128 ASCII letters, digits, '.', '_' or '-', "
+            "and not '.' or '..'. Task ids, handlers, steps, signals and operation ids share this rule."
+        )
 
 def _safe_integer(value, name, *, minimum=0):
     if (isinstance(value, bool) or not isinstance(value, int)
@@ -61,7 +65,11 @@ class Client:
                 config["bucket"] = bucket or os.environ.get("DEOOS_STORAGE_BUCKET") or (
                     os.environ.get("AWS_BUCKET") if provider == "s3" else None)
                 if not config["bucket"]:
-                    raise ValueError("bucket or DEOOS_STORAGE_BUCKET is required for library mode")
+                    raise ValueError(
+                        "bucket or DEOOS_STORAGE_BUCKET is required for library mode. "
+                        "Set DEOOS_STORAGE_BUCKET, or set ENGINE_URL to use a running server "
+                        "(`make dev` from a checkout)."
+                    )
             config["prefix"] = prefix or os.environ.get("EXECUTION_PREFIX", "deoos")
             if "lease_ms" not in config and "LEASE_MS" in os.environ:
                 config["lease_ms"] = int(os.environ["LEASE_MS"])
@@ -89,10 +97,16 @@ class Client:
                 info = self.request("/info")
             except EngineError as error:
                 if error.status == 404:
-                    raise EngineError(409, "engine protocol version 3 is required") from error
+                    raise EngineError(
+                        409,
+                        "engine protocol version 3 is required; upgrade deoos so this SDK and the server match",
+                    ) from error
                 raise
             if not isinstance(info, dict) or info.get("protocol_version") != 3:
-                raise EngineError(409, "engine protocol version 3 is required")
+                raise EngineError(
+                    409,
+                    "engine protocol version 3 is required; upgrade deoos so this SDK and the server match",
+                )
             if not isinstance(data, dict):
                 raise TypeError("mutation data must be an object")
             data = {**data, "protocol_version": 3}
@@ -107,7 +121,13 @@ class Client:
             with urllib.request.urlopen(req, timeout=10) as response:
                 return json.load(response)
         except urllib.error.HTTPError as error:
-            raise EngineError(error.code, error.read().decode()) from error
+            detail = error.read().decode()
+            raise EngineError(error.code, detail or error.reason) from error
+        except urllib.error.URLError as error:
+            raise OSError(
+                f"cannot reach engine at {self.url}; check ENGINE_URL and that deoos-server is running "
+                "(`make dev` from a checkout)"
+            ) from error
 
     def submit(self, task_id, handler, inputs, max_attempts=3, retry_ms=0):
         return self.request("/tasks", dict(id=task_id, handler=handler, inputs=inputs,
@@ -325,7 +345,10 @@ class Context:
         self.check_owner()
         state = self.client.request(f'/tasks/{self.task["id"]}')
         if state.get("status") != "running" or state.get("token") != self.task["token"]:
-            error = EngineError(409, "ownership lost or task is no longer running")
+            error = EngineError(
+                409,
+                "ownership lost or task is no longer running; stop this attempt and let a worker claim it again",
+            )
             self.ownership_error = error
             raise error
         return state
@@ -473,7 +496,10 @@ def client_from_environment():
         return Client()
     if mode == "server":
         if not url:
-            raise ValueError("DEOOS_MODE=server requires ENGINE_URL")
+            raise ValueError(
+                "DEOOS_MODE=server requires ENGINE_URL. Start a server with `make dev` "
+                "and export ENGINE_URL=http://127.0.0.1:7331."
+            )
         return Client.remote(url, token)
     if mode:
         raise ValueError("DEOOS_MODE must be 'library' or 'server'")

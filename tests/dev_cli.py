@@ -13,6 +13,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import urllib.parse
 import urllib.request
 import uuid
 from pathlib import Path
@@ -85,6 +86,8 @@ def client_env():
     env["PYTHONPATH"] = PYTHONPATH
     env.pop("ENGINE_TOKEN", None)
     env.pop("DEOOS_MODE", None)
+    for name in ("DEOOS_AGENT", "CURSOR_AGENT", "CLAUDECODE", "CODEX"):
+        env.pop(name, None)
     return env
 
 
@@ -253,8 +256,58 @@ def main():
         missing = cli(env, "inspect", "missing-task", check=False)
         if missing.returncode != 1 or "cannot reach engine" in missing.stderr or "404" not in missing.stderr:
             raise AssertionError(f"expected a 404, got {missing.stderr!r}")
-        if "Traceback" in missing.stderr:
+        if "Traceback" in missing.stderr or "not found" not in missing.stderr or "list" not in missing.stderr:
             raise AssertionError(missing.stderr)
+        bad_id = cli(env, "submit", "..", "demo.order.v1", "{}", check=False)
+        if bad_id.returncode != 1 or "invalid task id" not in bad_id.stderr or "1-128" not in bad_id.stderr:
+            raise AssertionError(f"{bad_id.returncode}\n{bad_id.stderr!r}")
+        feedback_env = client_env()
+        feedback_env.pop("GITHUB_TOKEN", None)
+        feedback_env.pop("GH_TOKEN", None)
+        feedback_env["ENGINE_TOKEN"] = "should-not-appear-in-feedback"
+        reported = cli_json(
+            feedback_env, "feedback", "--tried", "inspect a missing task",
+            "--happened", "404 not found")
+        if reported.get("filed") is not False or "issues/new" not in reported.get("url", ""):
+            raise AssertionError(reported)
+        decoded = urllib.parse.unquote(reported["url"])
+        if "deoos-agent-feedback" not in decoded or "inspect a missing task" not in decoded:
+            raise AssertionError(decoded)
+        if "should-not-appear-in-feedback" in reported["url"] or "should-not-appear-in-feedback" in decoded:
+            raise AssertionError("feedback included ENGINE_TOKEN")
+        secret = cli(
+            feedback_env, "feedback", "--tried", "key AKIAIOSFODNN7EXAMPLE",
+            "--happened", "failed", check=False)
+        if secret.returncode != 1 or "secret" not in secret.stderr or "AKIA" in secret.stdout:
+            raise AssertionError(f"{secret.returncode}\n{secret.stdout!r}\n{secret.stderr!r}")
+        pretty = cli(env, "info")
+        if "\n  " not in pretty.stdout or "deoos:" in pretty.stderr:
+            raise AssertionError(f"human info was not pretty\n{pretty.stdout!r}\n{pretty.stderr!r}")
+        agent_env = client_env()
+        agent_env["DEOOS_AGENT"] = "1"
+        compact = cli(agent_env, "info")
+        if compact.stderr.strip() != "deoos: info" or "\n  " in compact.stdout:
+            raise AssertionError(f"agent info was not compact\n{compact.stdout!r}\n{compact.stderr!r}")
+        flagged = cli(env, "--agent", "info")
+        if flagged.stderr.strip() != "deoos: info" or "\n  " in flagged.stdout:
+            raise AssertionError(f"--agent was ignored\n{flagged.stdout!r}\n{flagged.stderr!r}")
+        detected = client_env()
+        detected["CURSOR_AGENT"] = "1"
+        auto = cli(detected, "info")
+        if "deoos: info" not in auto.stderr:
+            raise AssertionError(auto.stderr)
+        override = client_env()
+        override["CURSOR_AGENT"] = "1"
+        override["DEOOS_AGENT"] = "0"
+        forced = cli(override, "info")
+        if "deoos:" in forced.stderr or "\n  " not in forced.stdout:
+            raise AssertionError(f"DEOOS_AGENT=0 did not win\n{forced.stdout!r}\n{forced.stderr!r}")
+        missing_agent = cli(agent_env, "inspect", "missing-task", check=False)
+        if (missing_agent.returncode != 1
+                or "deoos: inspect missing-task" not in missing_agent.stderr
+                or "not found" not in missing_agent.stderr
+                or "list" not in missing_agent.stderr):
+            raise AssertionError(missing_agent.stderr)
 
         with tempfile.TemporaryDirectory() as scratch:
             marker = Path(scratch) / "marker.txt"
@@ -335,6 +388,24 @@ def main():
                     raise AssertionError(history)
             if events.count("claim") < 1 or events.count("signal") != 1:
                 raise AssertionError(history)
+            agent_env = client_env()
+            agent_env["DEOOS_AGENT"] = "1"
+            explained = cli(agent_env, "explain", TASK)
+            if "\n  " in explained.stdout or "Attempts:" in explained.stdout:
+                raise AssertionError(explained.stdout)
+            explained_body = json.loads(explained.stdout)
+            if explained_body.get("status") != "completed" or explained.stderr.strip() != f"deoos: explain {TASK}":
+                raise AssertionError(f"{explained.stdout!r}\n{explained.stderr!r}")
+            agent_history = cli_json(agent_env, "history", TASK)
+            if agent_history.get("truncated") is not False or "submit" not in {
+                    item["event"] for item in agent_history["events"]}:
+                raise AssertionError(agent_history)
+            terminal = cli(env, "signal", TASK, "later", "true", check=False)
+            if terminal.returncode != 1 or "cannot signal a terminal task" not in terminal.stderr:
+                raise AssertionError(terminal.stderr)
+            refused = cli(env, "retry", TASK, check=False)
+            if refused.returncode != 1 or "only failed or cancelled" not in refused.stderr:
+                raise AssertionError(refused.stderr)
             worker.kill()
             worker.wait(timeout=5)
             worker_handle.close()

@@ -58,20 +58,30 @@ async fn dispatch_http(
     {
         return Err((
             StatusCode::UNSUPPORTED_MEDIA_TYPE,
-            "application/json required".into(),
+            "application/json required; set Content-Type to application/json".into(),
         ));
     }
     if let Some(token) = &server.token
         && headers.get("authorization").and_then(|v| v.to_str().ok())
             != Some(format!("Bearer {token}").as_str())
     {
-        return Err((StatusCode::UNAUTHORIZED, "authentication required".into()));
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            "authentication required; set ENGINE_TOKEN to the token this server was started with"
+                .into(),
+        ));
     }
     let data = if body.is_empty() {
         Value::Null
     } else {
         serde_json::from_slice(&body)
-            .map_err(|_| (StatusCode::BAD_REQUEST, "invalid JSON".into()))?
+            .map_err(|_| {
+                (
+                    StatusCode::BAD_REQUEST,
+                    "invalid JSON; send a JSON object, for example {\"id\":\"task-1\",\"handler\":\"greet\",\"inputs\":{}}"
+                        .into(),
+                )
+            })?
     };
     server
         .engine

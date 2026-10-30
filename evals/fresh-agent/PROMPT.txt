@@ -1,0 +1,7 @@
+Add durable retries to this script.
+
+The script is evals/fresh-agent/charge.py. charge() fails most of the time, and killing the process loses the attempt. A successful charge must not run again when the process is killed and started again.
+
+Use only public deoos docs: the repository README and agents/SKILL.md. Do not read the engine source, the test suite, or clients/python/deoos except by following those docs.
+
+The engine is already running at ENGINE_URL=http://127.0.0.1:7331. PYTHONPATH includes clients/python. Show a completed task with python -m deoos inspect.

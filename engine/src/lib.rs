@@ -191,6 +191,15 @@ fn bad(s: &str) -> (StatusCode, String) {
 fn conflict(s: &str) -> (StatusCode, String) {
     (StatusCode::CONFLICT, s.into())
 }
+fn name_rule() -> &'static str {
+    "use 1-128 ASCII letters, digits, '.', '_' or '-', and not '.' or '..'"
+}
+fn contention() -> (StatusCode, String) {
+    conflict("contention; retry the same request with the same operation id and body")
+}
+fn unknown_route() -> (StatusCode, String) {
+    bad("unknown route; use `python -m deoos --help` or the Python or TypeScript SDK")
+}
 fn after_ms(delay: u64) -> Result<u64, (StatusCode, String)> {
     now()
         .checked_add(delay)
@@ -224,8 +233,8 @@ fn storage(err: object_store::Error) -> (StatusCode, String) {
     }
     if matches!(&err, object_store::Error::Generic { store: "DEOOS", .. }) {
         return (
-            StatusCode::SERVICE_UNAVAILABLE,
-            "storage deadline exceeded; write outcome uncertain".into(),
+                StatusCode::SERVICE_UNAVAILABLE,
+            "storage deadline exceeded; write outcome uncertain; retry the same operation id and do not assume the write failed".into(),
         );
     }
     match err {
@@ -237,7 +246,8 @@ fn storage(err: object_store::Error) -> (StatusCode, String) {
             eprintln!("storage: {}", qualification::error_kind(&err));
             (
                 StatusCode::SERVICE_UNAVAILABLE,
-                "storage unavailable".into(),
+                "storage unavailable; retry shortly and check credentials, endpoint, and bucket"
+                    .into(),
             )
         }
     }
@@ -253,9 +263,23 @@ impl Engine {
     }
     async fn read(&self, id: &str) -> Result<(Task, UpdateVersion), (StatusCode, String)> {
         if !valid(id) {
-            return Err(bad("invalid task id"));
+            return Err(bad(&format!("invalid task id; {}", name_rule())));
         }
-        let (meta, bytes) = self.get_bytes(&self.key(id)).await.map_err(storage)?;
+        let (meta, bytes) = match self.get_bytes(&self.key(id)).await {
+            Ok(found) => found,
+            Err(err) => {
+                let mapped = storage(err);
+                if mapped.0 == StatusCode::NOT_FOUND {
+                    return Err((
+                        StatusCode::NOT_FOUND,
+                        format!(
+                            "task '{id}' not found; check the id with `python -m deoos list`, or submit it"
+                        ),
+                    ));
+                }
+                return Err(mapped);
+            }
+        };
         let v = UpdateVersion {
             e_tag: meta.e_tag.clone(),
             version: meta.version.clone(),
@@ -326,9 +350,10 @@ impl Engine {
     }
     async fn retry(&self, id: &str, request: RetryRequest) -> ApiResult<Task> {
         if !valid(&request.operation_id) || !valid(&request.expected_revision) {
-            return Err(bad(
-                "valid retry operation ID and expected revision required",
-            ));
+            return Err(bad(&format!(
+                "valid retry operation ID and expected revision required; both must be names ({})",
+                name_rule()
+            )));
         }
         let fingerprint = format!(
             "{:x}",
@@ -348,10 +373,15 @@ impl Engine {
                 };
             }
             if task.revision != request.expected_revision {
-                return Err(conflict("task changed since inspection"));
+                return Err(conflict(
+                    "task changed since inspection; read the current revision with inspect or history and pass that expected_revision. Reuse the same operation_id only when repeating this exact retry",
+                ));
             }
             if !["failed", "cancelled"].contains(&task.status.as_str()) {
-                return Err(conflict("only failed or cancelled tasks can be retried"));
+                return Err(conflict(&format!(
+                    "only failed or cancelled tasks can be retried; this task is {}. Inspect it, then retry with its current revision. Waiting work resumes when a worker polls",
+                    task.status
+                )));
             }
             task.status = "queued".into();
             task.attempts = 0;
@@ -393,7 +423,7 @@ impl Engine {
                 }
             }
         }
-        Err(conflict("contention; retry"))
+        Err(contention())
     }
     async fn children_terminal(&self, ids: &[String]) -> Result<bool, (StatusCode, String)> {
         for id in ids {
@@ -434,7 +464,10 @@ impl Engine {
     }
     async fn signal(&self, id: &str, name: &str, request: SignalRequest) -> ApiResult<Task> {
         if !valid(name) || !valid(&request.operation_id) {
-            return Err(bad("invalid signal name or operation ID"));
+            return Err(bad(&format!(
+                "invalid signal name or operation ID; {}",
+                name_rule()
+            )));
         }
         let result_key = Key::from(format!(
             "{}/tasks/{id}/signals/{name}/{}.json",
@@ -450,11 +483,16 @@ impl Engine {
                 {
                     Ok(Json(task))
                 } else {
-                    Err(conflict("signal already assigned a different value"))
+                    Err(conflict(
+                        "signal already assigned a different value; repeat the same value and operation_id, or choose a new signal name",
+                    ))
                 };
             }
             if ["completed", "failed", "cancelled"].contains(&task.status.as_str()) {
-                return Err(conflict("cannot signal a terminal task"));
+                return Err(conflict(&format!(
+                    "cannot signal a terminal task (status is {}); retry a failed or cancelled task before signalling, or submit a new id",
+                    task.status
+                )));
             }
             if !uploaded {
                 let data = Bytes::from(serde_json::to_vec(&request.value).unwrap());
@@ -500,7 +538,7 @@ impl Engine {
                 }
             }
         }
-        Err(conflict("contention; retry"))
+        Err(contention())
     }
     async fn cancel(&self, id: &str) -> ApiResult<Task> {
         for _ in 0..16 {
@@ -510,7 +548,10 @@ impl Engine {
                 return Ok(Json(task));
             }
             if ["completed", "failed"].contains(&task.status.as_str()) {
-                return Err(conflict("cannot cancel a terminal task"));
+                return Err(conflict(&format!(
+                    "cannot cancel a terminal task (status is {}); completed and failed tasks stay finished",
+                    task.status
+                )));
             }
             task.status = "cancelled".into();
             task.expires_at = 0;
@@ -527,7 +568,7 @@ impl Engine {
                 Err(error) => return Err(error),
             }
         }
-        Err(conflict("contention; retry"))
+        Err(contention())
     }
     async fn mutate(
         &self,
@@ -540,7 +581,7 @@ impl Engine {
             return Err(bad("operation_id required"));
         }
         if step.is_some_and(|s| !valid(s)) {
-            return Err(bad("invalid step"));
+            return Err(bad(&format!("invalid step; {}", name_rule())));
         }
         let operation_request =
             normalized_json(json!({"action": action, "step": step, "value": m.value}));
@@ -568,7 +609,9 @@ impl Engine {
                 || t.token.as_deref() != Some(&m.token)
                 || t.expires_at <= now()
             {
-                return Err(conflict("ownership lost or expired"));
+                return Err(conflict(
+                    "ownership lost or expired; stop this attempt. A worker can claim the task again after the lease",
+                ));
             }
             let owned_until = t.expires_at;
             if action == "define"
@@ -761,12 +804,20 @@ impl Engine {
                 Err(e) => return Err(e),
             }
         }
-        Err(conflict("contention; retry"))
+        Err(contention())
     }
 }
 async fn submit(State(e): State<Engine>, Json(s): Json<Submit>) -> ApiResult<Task> {
-    if !valid(&s.id) || !valid(&s.handler) || s.max_attempts == 0 {
-        return Err(bad("invalid id, handler or attempt budget"));
+    if !valid(&s.id) {
+        return Err(bad(&format!("invalid task id; {}", name_rule())));
+    }
+    if !valid(&s.handler) {
+        return Err(bad(&format!("invalid handler; {}", name_rule())));
+    }
+    if s.max_attempts == 0 {
+        return Err(bad(
+            "invalid attempt budget; max_attempts must be at least 1",
+        ));
     }
     after_ms(s.retry_ms)?;
     let mut t = Task {
@@ -821,13 +872,17 @@ fn submitted_existing(existing: Task, submitted: &Task) -> ApiResult<Task> {
         || existing.retry_ms != submitted.retry_ms
         || existing.schedule != submitted.schedule
     {
-        return Err(conflict("task ID already used with different definition"));
+        return Err(conflict(
+            "task ID already used with different definition; resubmit the same handler and inputs, or choose a new id",
+        ));
     }
     Ok(Json(existing))
 }
 async fn claim(State(e): State<Engine>, Json(c): Json<Claim>) -> ApiResult<Value> {
     if c.worker.is_empty() || c.handlers.is_empty() {
-        return Err(bad("worker and handlers required"));
+        return Err(bad(
+            "worker and handlers required; pass a worker id and at least one handler name",
+        ));
     }
     e.ensure_active().await?;
     schedules::tick(&e, &c.handlers).await?;
@@ -1309,7 +1364,9 @@ impl Engine {
             && data.get("protocol_version").and_then(Value::as_u64)
                 != Some(u64::from(PROTOCOL_VERSION))
         {
-            return Err(conflict("protocol_version 3 required for mutations"));
+            return Err(conflict(
+                "protocol_version 3 required for mutations; upgrade the SDK so it matches this server",
+            ));
         }
         if method == "GET" && path == "/info" {
             return Ok(
@@ -1344,7 +1401,7 @@ impl Engine {
             return schedules::dispatch(self, method, &parts, data).await;
         }
         if parts.len() < 2 || parts[0] != "tasks" {
-            return Err(bad("unknown route"));
+            return Err(unknown_route());
         }
         let id = parts[1];
         if method == "GET" && parts.len() == 2 {
@@ -1383,7 +1440,7 @@ impl Engine {
         }
         if parts.len() == 4 && parts[2] == "signals" {
             if !valid(parts[3]) {
-                return Err(bad("invalid signal name"));
+                return Err(bad(&format!("invalid signal name; {}", name_rule())));
             }
             if method == "POST" {
                 return self
@@ -1396,7 +1453,15 @@ impl Engine {
                 let key = task
                     .signals
                     .get(parts[3])
-                    .ok_or((StatusCode::NOT_FOUND, "signal not assigned".into()))?;
+                    .ok_or_else(|| {
+                        (
+                            StatusCode::NOT_FOUND,
+                            format!(
+                                "signal '{}' is not assigned; send it with `python -m deoos signal {} {} VALUE` while a worker is running",
+                                parts[3], id, parts[3]
+                            ),
+                        )
+                    })?;
                 return self.payload(key).await;
             }
         }
@@ -1432,7 +1497,7 @@ impl Engine {
                 .await
                 .map(|v| json!(v.0));
         }
-        Err(bad("unknown route"))
+        Err(unknown_route())
     }
 }
 mod ffi;

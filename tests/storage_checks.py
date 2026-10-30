@@ -279,7 +279,7 @@ with Client(provider="azure", bucket="fake-container",
         client.inspect("review-task")
     except EngineError as error:
         assert error.status == 503
-        assert str(error) == "503: storage unavailable"
+        assert str(error) == "503: storage unavailable; retry shortly and check credentials, endpoint, and bucket"
     else:
         raise AssertionError("fake provider rejection unexpectedly succeeded")
 '''

@@ -45,7 +45,7 @@ try:
       time.sleep(.1)
      else:raise AssertionError('server unavailable')
      try:Client.remote(os.environ['ENGINE_URL']).request('/info')
-     except EngineError as e:assert e.status==401
+     except EngineError as e:assert e.status==401 and 'ENGINE_TOKEN' in str(e), e
      else:raise AssertionError('server accepted unauthenticated operation')
      passed.append('shared server accepts authenticated clients; rejects missing token')
     a,b=create(),create()
@@ -54,6 +54,24 @@ try:
      except EngineError as error: assert error.status==status, error
      except urllib.error.HTTPError as error: assert error.code==status, error
      else: raise AssertionError(f'expected status {status}')
+    def expect_text(status, snippet, fn):
+     try: fn()
+     except EngineError as error: assert error.status==status and snippet in str(error), error
+     else: raise AssertionError(f'expected {status} containing {snippet!r}')
+    try: a.inspect('..')
+    except ValueError as error: assert '1-128' in str(error), error
+    else: raise AssertionError('invalid id was accepted')
+    expect_text(400, 'invalid task id', lambda: a.submit('..', 'raw', {}))
+    expect_text(400, '1-128', lambda: a.submit('..', 'raw', {}))
+    missing = None
+    try: a.inspect('missing-error-task')
+    except EngineError as error: missing = error
+    else: raise AssertionError('missing task was found')
+    assert missing.status == 404 and 'not found' in str(missing) and 'list' in str(missing), missing
+    sock = __import__('socket').socket(); sock.bind(('127.0.0.1', 0)); port = sock.getsockname()[1]; sock.close()
+    try: Client.remote(f'http://127.0.0.1:{port}').request('/info')
+    except OSError as error: assert 'cannot reach engine' in str(error) and 'make dev' in str(error), error
+    else: raise AssertionError('closed port accepted a request')
     if mode=='server':
      def browser_request(url,identifier,origin=None,content_type='application/json',token=None):
       headers={'Content-Type':content_type}
@@ -107,6 +125,10 @@ try:
     expect_status(409,lambda:a.request('/tasks/names/steps/saved',dict(checkpoint,value={'changed':True})))
     a.request('/tasks/names/complete',dict(token=t['token'],operation_id='finish',value=True))
     assert a.request('/claim',dict(worker='after-result',handlers=['names']))['task'] is None
+    expect_text(409, 'cannot signal a terminal task', lambda: a.signal('names', 'go', True))
+    expect_text(409, 'only failed or cancelled tasks can be retried', lambda: a.retry('names', a.inspect('names')['revision'], 'retry-names'))
+    expect_text(409, 'different definition', lambda: a.submit('names', 'other', {}))
+    expect_text(409, 'new id', lambda: a.submit('names', 'other', {}))
     passed.append('invalid dot names/overflow rejected; exact mutation replay; changed replay rejected; state-named result cannot poison discovery')
     info=a.request('/info')
     assert info['process_id']==(os.getpid() if mode=='library' else server.pid)
@@ -116,6 +138,16 @@ try:
     script="import {Client} from './clients/typescript/dist/index.js';const c=process.env.DEOOS_MODE==='library'?new Client({bucket:process.env.DEOOS_STORAGE_BUCKET,prefix:process.env.EXECUTION_PREFIX}):Client.remote(process.env.ENGINE_URL,process.env.ENGINE_TOKEN);if(process.env.DEOOS_MODE==='library')globalThis.fetch=()=>{throw new Error('library used HTTP');};const i=await c.request('/info');if(process.env.DEOOS_MODE==='library'&&i.process_id!==process.pid)throw new Error('engine not embedded');console.log(i.process_id);"
     subprocess.run(['node','--input-type=module','-e',script],cwd=ROOT,env=child_env,check=True,capture_output=True,text=True)
     passed.append('Python and Node engine process identity proves selected mode')
+    script="""import {Client,EngineError} from './clients/typescript/dist/index.js';
+const c=process.env.DEOOS_MODE==='library'?new Client({bucket:process.env.DEOOS_STORAGE_BUCKET,prefix:process.env.EXECUTION_PREFIX}):Client.remote(process.env.ENGINE_URL,process.env.ENGINE_TOKEN);
+try{await c.inspect('..');throw new Error('invalid id accepted')}catch(error){if(!String(error.message).includes('1-128'))throw error}
+try{await c.inspect('missing-error-task');throw new Error('missing task found')}catch(error){if(!(error instanceof EngineError)||error.status!==404||!String(error.message).includes('not found')||!String(error.message).includes('list'))throw error}
+try{await c.signal('names','go',true);throw new Error('terminal signal accepted')}catch(error){if(!(error instanceof EngineError)||error.status!==409||!String(error.message).includes('cannot signal a terminal task'))throw error}
+const down=Client.remote('http://127.0.0.1:9');
+try{await down.request('/info');throw new Error('closed port accepted')}catch(error){if(!String(error.message).includes('cannot reach engine'))throw error}
+"""
+    subprocess.run(['node','--input-type=module','-e',script],cwd=ROOT,env=child_env,check=True,capture_output=True,text=True)
+    passed.append('common Python and TypeScript errors name the failure and a fix')
     script="import {Client} from './clients/typescript/dist/index.js';const c=process.env.DEOOS_MODE==='library'?new Client({bucket:process.env.DEOOS_STORAGE_BUCKET,prefix:process.env.EXECUTION_PREFIX}):Client.remote(process.env.ENGINE_URL,process.env.ENGINE_TOKEN);await c.submit('prototype-steps','prototype-steps',{});await c.runOnce({'prototype-steps':async ctx=>{const a=await ctx.step('constructor',()=>21);const b=await ctx.step('toString',()=>21);return a+b;}});if((await c.request('/tasks/prototype-steps')).output!==42)throw new Error('prototype step names failed');"
     subprocess.run(['node','--input-type=module','-e',script],cwd=ROOT,env=child_env,check=True,capture_output=True,text=True)
     passed.append('TypeScript checkpoints accept constructor and toString names')

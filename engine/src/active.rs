@@ -211,7 +211,9 @@ impl Engine {
             }
             current = self.read(id).await;
         }
-        Err(conflict("active intent contention; retry"))
+        Err(conflict(
+            "active intent contention; retry the same request with the same operation id and body",
+        ))
     }
 
     pub(super) async fn active_candidates(

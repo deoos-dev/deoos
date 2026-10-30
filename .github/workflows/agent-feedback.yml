@@ -1,0 +1,30 @@
+name: Agent feedback
+
+on:
+  issues:
+    types: [opened]
+
+permissions:
+  issues: write
+
+jobs:
+  triage:
+    if: contains(github.event.issue.body, 'deoos-agent-feedback') || startsWith(github.event.issue.title, '[agent-feedback]')
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Label and group the report
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ISSUE: ${{ github.event.issue.number }}
+        run: |
+          gh label create agent-feedback --repo "$GITHUB_REPOSITORY" --color 5319e7 --description "Filed by deoos feedback" || true
+          gh issue edit "$ISSUE" --repo "$GITHUB_REPOSITORY" --add-label agent-feedback
+          gh issue comment "$ISSUE" --repo "$GITHUB_REPOSITORY" --body "$(cat <<'EOF'
+          This is agent feedback. Triage is documented in `docs/agent-feedback.md`.
+
+          1. Confirm the report has no secrets.
+          2. Group it with other open `agent-feedback` issues that describe the same failure.
+          3. Fix that corner in the server, CLI, or SDK, and cover it with a behavioral test against a real engine.
+          4. Close the grouped issues with the commit or pull request link.
+          EOF
+          )"

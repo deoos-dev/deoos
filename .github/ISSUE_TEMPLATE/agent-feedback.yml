@@ -1,0 +1,35 @@
+name: Agent feedback
+description: Report a sharp corner in deoos
+title: "[agent-feedback] "
+labels:
+  - agent-feedback
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Include what you tried and what happened. Leave out secrets, tokens, and user code unless you mean to share them. The HTML comment below lets the triage workflow find this issue.
+
+        <!-- deoos-agent-feedback -->
+  - type: textarea
+    id: tried
+    attributes:
+      label: What did you try?
+    validations:
+      required: true
+  - type: textarea
+    id: happened
+    attributes:
+      label: What happened?
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Repro
+      description: Optional. Sent only if you fill it in. Do not include secrets.
+  - type: input
+    id: version
+    attributes:
+      label: deoos version
+      description: Output of python -m deoos info, or the package version.
+      placeholder: "0.7.2"
