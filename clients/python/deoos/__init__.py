@@ -1,5 +1,5 @@
 """Worker SDK: library mode or an explicit server-mode connection."""
-__version__ = "0.7.2"
+__version__ = "0.8.0"
 import hashlib
 import http.client
 import json
