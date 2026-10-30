@@ -55,7 +55,7 @@ export class ChildFailed extends Error {
   }
 }
 function validStep(name:string){
-  if(typeof name!=='string'||!/^[A-Za-z0-9_.-]{1,128}$/.test(name)||name==='.'||name==='..')throw new Error('invalid step name');
+  if(typeof name!=='string'||!/^[A-Za-z0-9_.-]{1,128}$/.test(name)||name==='.'||name==='..')throw new Error("invalid name; use 1-128 ASCII letters, digits, '.', '_' or '-', and not '.' or '..'. Task ids, handlers, steps, signals and operation ids share this rule.");
 }
 function safeInteger(value:number,name:string,minimum=0){if(!Number.isSafeInteger(value)||value<minimum)throw new Error(`${name} must be a safe integer >= ${minimum}`);}
 export class Client {
@@ -78,10 +78,10 @@ export class Client {
     if(data!==undefined){
       let info;
       try{info=await this.request('/info');}catch(error){
-        if(error instanceof EngineError&&error.status===404)throw new EngineError(409,'unsupported engine protocol; expected 3');
+        if(error instanceof EngineError&&error.status===404)throw new EngineError(409,'unsupported engine protocol; expected 3. Upgrade deoos so this SDK and the server match.');
         throw error;
       }
-      if(info?.protocol_version!==3)throw new EngineError(409,'unsupported engine protocol; expected 3');
+      if(info?.protocol_version!==3)throw new EngineError(409,'unsupported engine protocol; expected 3. Upgrade deoos so this SDK and the server match.');
       if(data===null||typeof data!=='object'||Array.isArray(data))throw new Error('request body must be an object');
       data={...data,protocol_version:3};
     }
@@ -90,8 +90,16 @@ export class Client {
       if(response.status!==200)throw new EngineError(response.status,response.error);
       return response.value;
     }
-    const response=await fetch(this.url+path,{method:data===undefined?'GET':'POST',headers:{'Content-Type':'application/json',...(this.token?{Authorization:'Bearer '+this.token}:{})},body:data===undefined?undefined:JSON.stringify(data),signal:AbortSignal.timeout(10000)});
-    if(!response.ok) throw new EngineError(response.status,await response.text());
+    let response:Response;
+    try{
+      response=await fetch(this.url+path,{method:data===undefined?'GET':'POST',headers:{'Content-Type':'application/json',...(this.token?{Authorization:'Bearer '+this.token}:{})},body:data===undefined?undefined:JSON.stringify(data),signal:AbortSignal.timeout(10000)});
+    }catch(error){
+      throw new Error(`cannot reach engine at ${this.url}; check the URL and that deoos-server is running`,{cause:error});
+    }
+    if(!response.ok){
+      const detail=(await response.text()).trim();
+      throw new EngineError(response.status,detail||response.statusText);
+    }
     return response.json();
   }
   submit(id:string,handler:string,inputs:unknown,max_attempts=3,retry_ms=0) { return this.request('/tasks',{id,handler,inputs,max_attempts,retry_ms}); }
@@ -215,7 +223,7 @@ export class Context {
     this.checkOwner();
     const state=await this.client.request(`/tasks/${this.task.id}`);
     if(state.status!=='running'||state.token!==this.task.token){
-      this.ownershipError=new EngineError(409,'task is no longer owned by this worker');
+      this.ownershipError=new EngineError(409,'task is no longer owned by this worker; stop this attempt and let a worker claim it again');
       throw this.ownershipError;
     }
     return state;

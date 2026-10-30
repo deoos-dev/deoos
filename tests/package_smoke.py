@@ -760,6 +760,8 @@ def main():
         assert len(bucket) <= 63, "test bucket prefix is too long"
     caller_identity = None
     env = dict(os.environ)
+    for name in ("DEOOS_AGENT", "CURSOR_AGENT", "CLAUDECODE", "CODEX"):
+        env.pop(name, None)
     for key in ("AWS_SESSION_TOKEN", "PYTHONPATH", "DEOOS_NATIVE_LIBRARY", "DEOOS_NODE_LIBRARY"):
         env.pop(key, None)
     for key in list(env):

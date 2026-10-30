@@ -168,7 +168,7 @@ The workflow APIs are the same in both modes. Use HTTPS through a TLS proxy acro
 - **Schedules:** fixed intervals, pause/resume and bounded backfills. Workers poll to admit due work; no separate scheduler service. No cron expressions or timezone/DST rules.
 - **Child workflows:** spawn tasks and join their results across workers.
 - **CLI and web UI:** inspect progress, read history, retry or cancel. Open `/ui` on a running server; internal details are separate from the default view.
-- **MCP:** `python -m deoos mcp` exposes read-only tools by default; `--allow-actions` enables explicit control tools.
+- **MCP:** `python -m deoos mcp` exposes read-only tools by default. `--allow-actions` adds submit, signal, retry, and cancel. `feedback` is always available. See [Agents](#agents).
 
 ```sh
 python -m deoos inspect greeting-001
@@ -215,7 +215,37 @@ python -m deoos submit TASK_ID HANDLER '{"key":"value"}'
 python -m deoos signal TASK_ID SIGNAL_NAME true
 ```
 
-`submit` and `signal` belong to this checkout. A refused connection prints `cannot reach engine at <url>; run make dev`. `AGENTS.md` is the kill-and-resume check for this server. `make test-dev` runs that check against the real engine.
+`submit`, `signal`, and `feedback` belong to this checkout. A refused connection prints `cannot reach engine at <url>; run make dev`. `AGENTS.md` is the kill-and-resume check for this server. `make test-dev` runs that check against the real engine.
+
+## Agents
+
+Copy [`agents/SKILL.md`](agents/SKILL.md) into a project so a coding agent can start a workflow, read status, send a signal, and resume a failed task without reading the SDK. Point the agent at that file, or register the MCP server:
+
+```json
+{
+  "mcpServers": {
+    "deoos": {
+      "command": "python",
+      "args": ["-m", "deoos", "mcp", "--allow-actions"],
+      "env": {"ENGINE_URL": "http://127.0.0.1:7331", "PYTHONPATH": "clients/python"}
+    }
+  }
+}
+```
+
+From a published install, drop `PYTHONPATH` and run the same module from the virtualenv that has the wheel. `--allow-actions` is required for `task_submit`, `task_signal`, and `task_retry`. Without it the server is read-only, plus `feedback`.
+
+`CURSOR_AGENT`, `CLAUDECODE`, `CODEX`, `DEOOS_AGENT=1`, or `--agent` selects agent mode: one JSON line on stdout, progress on stderr, and a `notice` when a list or history is capped instead of a silent cut. `DEOOS_AGENT=0` keeps the human layout. `explain` in agent mode is the summary JSON.
+
+`task_submit` starts a workflow. `task_summary` is the status. `task_signal` sends a signal. `task_retry` resumes a failed or cancelled task; pass the revision from `task_history`. These tools do not run a worker. A worker still has to poll.
+
+When an agent hits a sharp corner:
+
+```sh
+python -m deoos feedback --tried "what you tried" --happened "what happened"
+```
+
+With `GITHUB_TOKEN` or `GH_TOKEN` that files a GitHub issue in `deoos-dev/deoos` labeled `agent-feedback`. Without a token it prints a prefilled issue URL. The report is the text you pass, the deoos version, and whether the engine responded. It does not attach workflow payloads or environment variables. Secret-like text is refused unless you pass `--include-secrets`. Optional `--repro` is sent only when you set it. [docs/agent-feedback.md](docs/agent-feedback.md) is the triage path. [evals/fresh-agent/README.md](evals/fresh-agent/README.md) is the repeatable fresh-agent check.
 
 ## License
 

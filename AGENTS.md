@@ -1,5 +1,7 @@
 # Working on deoos
 
+Agents using deoos, rather than changing this repository, should follow [agents/SKILL.md](agents/SKILL.md). That file is safe to copy into another project. Feedback from a sharp corner is `python -m deoos feedback`; triage is [docs/agent-feedback.md](docs/agent-feedback.md).
+
 Start the engine, run a workflow, and check the result with `python -m deoos`. That CLI is the verification tool.
 
 ## Start locally

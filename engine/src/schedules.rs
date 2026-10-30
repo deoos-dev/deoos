@@ -93,9 +93,23 @@ fn key(e: &Engine, id: &str) -> Key {
 }
 async fn read(e: &Engine, id: &str) -> Result<(Schedule, UpdateVersion), Error> {
     if !valid(id) {
-        return Err(bad("invalid schedule id"));
+        return Err(bad(&format!("invalid schedule id; {}", name_rule())));
     }
-    let (meta, bytes) = e.get_bytes(&key(e, id)).await.map_err(storage)?;
+    let (meta, bytes) = match e.get_bytes(&key(e, id)).await {
+        Ok(found) => found,
+        Err(err) => {
+            let mapped = storage(err);
+            if mapped.0 == StatusCode::NOT_FOUND {
+                return Err((
+                    StatusCode::NOT_FOUND,
+                    format!(
+                        "schedule '{id}' not found; check the id, or create it with the SDK schedule call"
+                    ),
+                ));
+            }
+            return Err(mapped);
+        }
+    };
     let version = UpdateVersion {
         e_tag: meta.e_tag.clone(),
         version: meta.version.clone(),
@@ -163,9 +177,10 @@ async fn create(e: &Engine, request: Create) -> Result<Value, Error> {
         || request.interval_ms == 0
         || request.max_attempts == 0
     {
-        return Err(bad(
-            "invalid schedule id, handler, interval or attempt budget",
-        ));
+        return Err(bad(&format!(
+            "invalid schedule id, handler, interval or attempt budget; id and handler must be names ({}), interval_ms and max_attempts must be at least 1",
+            name_rule()
+        )));
     }
     after_ms(request.retry_ms)?;
     let anchor = request.first_due_ms.unwrap_or_else(now);
@@ -196,7 +211,7 @@ async fn create(e: &Engine, request: Create) -> Result<Value, Error> {
             let existing = read(e, &request.id).await?.0;
             if !same_definition(&existing, &request) {
                 return Err(conflict(
-                    "schedule ID already used with different definition",
+                    "schedule ID already used with different definition; resubmit the same definition, or choose a new id",
                 ));
             }
             Ok(json!(existing))
@@ -219,7 +234,7 @@ async fn control(e: &Engine, id: &str, paused: bool) -> Result<Value, Error> {
             Err(error) => return Err(error),
         }
     }
-    Err(conflict("contention; retry"))
+    Err(contention())
 }
 fn aligned_at_or_after(schedule: &Schedule, at: u64) -> Result<u64, Error> {
     if at <= schedule.first_due_ms {
@@ -272,7 +287,7 @@ async fn backfill(e: &Engine, id: &str, request: BackfillRequest) -> Result<Valu
             Err(error) => return Err(error),
         }
     }
-    Err(conflict("contention; retry"))
+    Err(contention())
 }
 fn fire_id(id: &str, at: u64) -> String {
     let digest = format!("{:x}", Sha256::digest(format!("{id}/{at}").as_bytes()));
@@ -385,7 +400,7 @@ async fn tick_one(e: &Engine, id: &str) -> Result<(), Error> {
             Err(error) => return Err(error),
         }
     }
-    Err(conflict("contention; retry"))
+    Err(contention())
 }
 pub(super) async fn tick(e: &Engine, handlers: &[String]) -> Result<(), Error> {
     let prefix = Key::from(format!("{}/schedules", e.prefix));
@@ -460,7 +475,9 @@ pub(super) async fn dispatch(
         return match method {
             "GET" => Ok(json!({"schedules":list(e).await?})),
             "POST" => create(e, serde_json::from_value(data).map_err(decode)?).await,
-            _ => Err(bad("unknown schedule route")),
+            _ => Err(bad(
+                "unknown schedule route; use the SDK schedule, pause, resume, or backfill calls",
+            )),
         };
     }
     let id = parts[1];
@@ -472,8 +489,12 @@ pub(super) async fn dispatch(
             "pause" => control(e, id, true).await,
             "resume" => control(e, id, false).await,
             "backfill" => backfill(e, id, serde_json::from_value(data).map_err(decode)?).await,
-            _ => Err(bad("unknown schedule route")),
+            _ => Err(bad(
+                "unknown schedule route; use the SDK schedule, pause, resume, or backfill calls",
+            )),
         };
     }
-    Err(bad("unknown schedule route"))
+    Err(bad(
+        "unknown schedule route; use the SDK schedule, pause, resume, or backfill calls",
+    ))
 }

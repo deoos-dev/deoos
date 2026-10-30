@@ -27,6 +27,7 @@ import sys
 import tempfile
 import uuid
 
+import urllib.parse
 import anyio
 from jsonschema import Draft202012Validator, validate
 from mcp import Client, StdioServerParameters, stdio_client
@@ -35,7 +36,8 @@ from mcp.shared.exceptions import MCPError
 from local_faults import ROOT, Server, wait_marker, fault_target, assert_layout
 
 READ_TOOLS = {'task_list', 'task_summary', 'task_history'}
-ACTION_TOOLS = {'task_cancel', 'task_retry', 'task_signal'}
+ACTION_TOOLS = {'task_cancel', 'task_retry', 'task_signal', 'task_submit'}
+FEEDBACK_TOOLS = {'feedback'}
 METADATA = {'id', 'handler', 'status', 'attempts', 'max_attempts', 'revision'}
 SENTINELS = ['MCP-INPUT-PRIVATE', 'MCP-CHECKPOINT-PRIVATE', 'MCP-OUTPUT-PRIVATE']
 WRAPPER = """import os,pathlib,sys
@@ -62,7 +64,9 @@ def clean_env():
             if not key.startswith(('AWS_', 'DEOOS_STORAGE_', 'DEOOS_FAULT_', 'DYLD_', 'MCP_TEST_'))
             and key not in {'ENGINE_URL', 'ENGINE_TOKEN', 'ENGINE_BIND', 'DEOOS_MODE',
                             'EXECUTION_PREFIX', 'LEASE_MS', 'PYTHONPATH',
-                            'DEOOS_NATIVE_LIBRARY', 'DEOOS_NODE_LIBRARY'}}
+                            'DEOOS_NATIVE_LIBRARY', 'DEOOS_NODE_LIBRARY',
+                            'GITHUB_TOKEN', 'GH_TOKEN', 'DEOOS_AGENT',
+                            'CURSOR_AGENT', 'CLAUDECODE', 'CODEX'}}
 
 
 def remote_env(env, server):
@@ -99,15 +103,23 @@ async def connection(python, env, work, *, actions=False):
 async def definitions(client, actions):
     result = await client.list_tools()
     tools = {tool.name: tool.model_dump(by_alias=True, exclude_none=True) for tool in result.tools}
-    assert set(tools) == READ_TOOLS | (ACTION_TOOLS if actions else set()), tools
+    assert set(tools) == READ_TOOLS | FEEDBACK_TOOLS | (ACTION_TOOLS if actions else set()), tools
     required = {'task_list': set(), 'task_summary': {'id'}, 'task_history': {'id'},
                 'task_cancel': {'id'}, 'task_retry': {'id', 'expected_revision', 'operation_id'},
-                'task_signal': {'id', 'name', 'value', 'operation_id'}}
+                'task_signal': {'id', 'name', 'value', 'operation_id'},
+                'task_submit': {'id', 'handler', 'inputs'}}
     for name, tool in tools.items():
         schema = tool['inputSchema']
         Draft202012Validator.check_schema(schema)
         assert schema['type'] == 'object' and schema['additionalProperties'] is False
-        assert set(schema.get('required', [])) == set(schema['properties']) == required[name]
+        if name == 'feedback':
+            assert set(schema['required']) == {'tried', 'happened'}
+            assert set(schema['properties']) == {'tried', 'happened', 'repro', 'include_secrets'}
+            assert tool['annotations']['destructiveHint'] is False
+            assert tool['annotations']['openWorldHint'] is True
+            assert tool['annotations']['idempotentHint'] is False
+        else:
+            assert set(schema.get('required', [])) == set(schema['properties']) == required[name]
         assert tool['annotations']['readOnlyHint'] == (name in READ_TOOLS)
         if name in ACTION_TOOLS:
             assert tool['annotations']['destructiveHint'] is True
@@ -140,6 +152,68 @@ def metadata(value):
         'id': {'type': 'string'}, 'handler': {'type': 'string'}, 'status': {'type': 'string'},
         'attempts': {'type': 'integer', 'minimum': 0}, 'max_attempts': {'type': 'integer', 'minimum': 1},
         'revision': {'type': 'string', 'minLength': 1}}, 'additionalProperties': False})
+
+
+def agent_stdio(python, env):
+    """CLI and MCP agent mode against the same real engine."""
+    child = dict(env, DEOOS_AGENT='1')
+    for name in ('CURSOR_AGENT', 'CLAUDECODE', 'CODEX'):
+        child.pop(name, None)
+    listed = subprocess.run([python, '-m', 'deoos', '--agent', 'list'], env=child,
+                            capture_output=True, text=True, timeout=60)
+    assert listed.returncode == 0, listed.stderr
+    payload = json.loads(listed.stdout)
+    assert payload['truncated'] is True
+    assert 'first 100' in payload['notice'] and 'inspect' in payload['notice']
+    assert listed.stderr.strip() == 'deoos: list'
+    assert '\n  ' not in listed.stdout
+    human = dict(child, DEOOS_AGENT='0')
+    pretty = subprocess.run([python, '-m', 'deoos', 'list'], env=human,
+                            capture_output=True, text=True, timeout=60)
+    assert pretty.returncode == 0, pretty.stderr
+    assert '\n  ' in pretty.stdout and 'first 100' in pretty.stdout
+    assert 'deoos:' not in pretty.stderr
+    override = dict(child, CURSOR_AGENT='1', DEOOS_AGENT='0')
+    forced = subprocess.run([python, '-m', 'deoos', 'info'], env=override,
+                            capture_output=True, text=True, timeout=60)
+    assert forced.returncode == 0 and 'deoos:' not in forced.stderr and '\n  ' in forced.stdout
+    process = subprocess.Popen([python, '-m', 'deoos', 'mcp', '--agent'], env=child,
+                               stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                               stderr=subprocess.PIPE, text=True, encoding='utf-8')
+
+    def send(message):
+        process.stdin.write(json.dumps(message) + '\n')
+        process.stdin.flush()
+        if 'id' not in message:
+            return None
+        assert select.select([process.stdout], [], [], 30)[0], 'agent MCP response timed out'
+        return json.loads(process.stdout.readline())
+
+    try:
+        ready = send({'jsonrpc': '2.0', 'id': 1, 'method': 'initialize', 'params': {
+            'protocolVersion': '2025-11-25', 'capabilities': {},
+            'clientInfo': {'name': 'deoos-agent-test', 'version': '1'}}})
+        assert ready['result']['protocolVersion'] == '2025-11-25'
+        send({'jsonrpc': '2.0', 'method': 'notifications/initialized'})
+        history = send({'jsonrpc': '2.0', 'id': 2, 'method': 'tools/call', 'params': {
+            'name': 'task_history', 'arguments': {'id': 'completed'}}})
+        body = history['result']['structuredContent']
+        text = history['result']['content'][0]['text']
+        assert body['truncated'] is True and 'cannot be fetched' in body['notice']
+        assert '\n' not in text and ': ' not in text
+        listing = send({'jsonrpc': '2.0', 'id': 3, 'method': 'tools/call', 'params': {
+            'name': 'task_list', 'arguments': {}}})
+        listed_body = listing['result']['structuredContent']
+        assert listed_body['truncated'] is True and 'first 100' in listed_body['notice']
+        process.stdin.close()
+        assert process.wait(timeout=10) == 0
+        err = process.stderr.read()
+        assert 'deoos: task_history completed' in err
+        assert 'deoos: task_list' in err
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait(timeout=10)
 
 
 def eof(python, env):
@@ -208,7 +282,7 @@ print(json.dumps(c.inspect('completed')))
     async with connection(python, env, work) as client:
         tools = await definitions(client, False)
         listing = await call(client, tools, 'task_list', {})
-        assert listing['truncated'] is False and len(listing['tasks']) == 2
+        assert listing['truncated'] is False and len(listing['tasks']) == 2 and 'notice' not in listing
         for task in listing['tasks']:
             metadata(task)
         summary = await call(client, tools, 'task_summary', {'id': 'completed'})
@@ -218,9 +292,11 @@ print(json.dumps(c.inspect('completed')))
                     'definitions', 'timers', 'signals', 'last_operation'}.intersection(summary)
         assert not any(secret in json.dumps([listing, summary]) for secret in SENTINELS)
         history = await call(client, tools, 'task_history', {'id': 'completed'})
-        assert set(history) == {'id', 'status', 'revision', 'history', 'bounded'}
+        assert set(history) == {'id', 'status', 'revision', 'history', 'bounded', 'truncated', 'notice'}
         assert history['revision'] == seeded['revision'] and history['status'] == 'completed'
-        assert history['bounded'] is True and len(history['history']) == 32
+        assert history['bounded'] is True and history['truncated'] is True
+        assert len(history['history']) == 32
+        assert 'last 32' in history['notice'] and 'cannot be fetched' in history['notice']
         assert history['history'] == seeded['history'][-32:]
         assert any(event.get('detail') == 'retained-message' for event in history['history'])
         for name in ACTION_TOOLS:
@@ -230,12 +306,42 @@ print(json.dumps(c.inspect('completed')))
                 assert error.code == -32602, error
             else:
                 raise AssertionError(f'disabled action dispatched: {name}')
-        await call(client, tools, 'task_summary', {'id': 'missing'}, status=404)
+        missing = await call(client, tools, 'task_summary', {'id': 'missing'}, status=404)
+        assert 'not found' in missing['error'] and 'list' in missing['error']
+        filed = await call(client, tools, 'feedback', {
+            'tried': 'submit a workflow', 'happened': 'task id was rejected'})
+        assert filed['filed'] is False and filed['version']
+        assert 'https://github.com/deoos-dev/deoos/issues/new?' in filed['url']
+        decoded = urllib.parse.unquote(filed['url'])
+        assert 'deoos-agent-feedback' in decoded and 'agent-feedback' in decoded
+        assert 'submit a workflow' in decoded and 'task id was rejected' in decoded
+        assert not any(secret in json.dumps(filed) for secret in SENTINELS)
+        blocked = await call(client, tools, 'feedback', {
+            'tried': 'AKIAIOSFODNN7EXAMPLE', 'happened': 'blocked'}, invalid=True)
+        assert 'secret' in blocked['error'] and 'AKIA' not in blocked['error']
         await call(client, tools, 'task_summary', {'id': '../unsafe'}, invalid=True)
         await call(client, tools, 'task_summary', {'id': 'pending', 'extra': True}, invalid=True)
         await call(client, tools, 'task_summary', {}, invalid=True)
     async with connection(python, env, work, actions=True) as client:
         tools = await definitions(client, True)
+        started = await call(client, tools, 'task_submit', {
+            'id': 'started', 'handler': 'started.v1', 'inputs': {'marker': 'public'}})
+        metadata(started)
+        assert started['status'] == 'queued' and started['handler'] == 'started.v1'
+        assert await call(client, tools, 'task_submit', {
+            'id': 'started', 'handler': 'started.v1', 'inputs': {'marker': 'public'}}) == started
+        conflict = await call(client, tools, 'task_submit', {
+            'id': 'started', 'handler': 'other.v1', 'inputs': {'marker': 'public'}}, status=409)
+        assert 'different definition' in conflict['error'] and 'new id' in conflict['error']
+        started_view = await call(client, tools, 'task_summary', {'id': 'started'})
+        assert started_view['status'] == 'queued' and started_view['completed_steps'] == []
+        await call(client, tools, 'task_submit', {
+            'id': 'started', 'handler': 'started.v1', 'inputs': []}, invalid=True)
+        stopped = await call(client, tools, 'task_cancel', {'id': 'started'})
+        resumed = await call(client, tools, 'task_retry', {
+            'id': 'started', 'expected_revision': stopped['revision'], 'operation_id': 'resume-started'})
+        metadata(resumed)
+        assert resumed['status'] == 'queued' and resumed['revision'] != stopped['revision']
         signalled = await call(client, tools, 'task_signal', {
             'id': 'pending', 'name': 'approved', 'value': {'approved': True}, 'operation_id': 'stable-signal'})
         metadata(signalled)
@@ -263,6 +369,8 @@ print(json.dumps(c.inspect('completed')))
         assert final['revision'] == retried['revision']
         assert sum(event['event'] == 'signal' for event in final['history']) == 1
         assert sum(event['event'] == 'retry' for event in final['history']) == 1
+        if len(final['history']) < 32:
+            assert 'notice' not in final and 'truncated' not in final
     # The engine listing is explicitly bounded. Read a known task beyond that
     # bound, without interpreting truncated=true as an empty or complete list.
     await anyio.to_thread.run_sync(sdk, python, env, """for number in range(101):
@@ -273,10 +381,12 @@ print(json.dumps(True))
         tools = await definitions(client, False)
         listing = await call(client, tools, 'task_list', {})
         assert listing['truncated'] is True and len(listing['tasks']) == 100
+        assert 'first 100' in listing['notice'] and 'inspect' in listing['notice']
         for task in listing['tasks']:
             metadata(task)
         assert 'tail-100' not in {task['id'] for task in listing['tasks']}
         assert (await call(client, tools, 'task_summary', {'id': 'tail-100'}))['status'] == 'queued'
+    await anyio.to_thread.run_sync(agent_stdio, python, env)
     await anyio.to_thread.run_sync(eof, python, env)
     if mode == 'server':
         async with connection(python, dict(env, ENGINE_TOKEN='wrong-test-token'), work) as client:
