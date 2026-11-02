@@ -23,7 +23,7 @@ export PYTHONPATH="$PWD/clients/python"
 
 Local RustFS uses the credentials in `compose.yaml`. Ambient AWS keys are not used. `LEASE_MS` (default 30000, minimum 1000) is the recovery lease and can be set when starting: `LEASE_MS=2000 make dev`.
 
-If the CLI is pointed at a server that is not running, it prints `cannot reach engine at <url>; run make dev`.
+If the CLI is pointed at a server that is not running, it prints `ENGINE_UNREACHABLE`: cannot reach engine at `<url>`, then `make dev` and `https://deoos.dev/errors#ENGINE_UNREACHABLE`. Every code is listed in [docs/errors.md](docs/errors.md).
 
 ## Run a workflow
 

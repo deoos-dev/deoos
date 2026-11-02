@@ -171,11 +171,7 @@ def main():
         else:
             print(dumps(result, agent))
     except Exception as error:
-        url = getattr(client, "url", None)
-        if url and isinstance(error, OSError):
-            print(f"cannot reach engine at {url}; run make dev", file=sys.stderr)
-        else:
-            print(str(error), file=sys.stderr)
+        print(str(error), file=sys.stderr)
         return 1
     finally:
         if client is not None:

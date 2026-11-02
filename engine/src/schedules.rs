@@ -98,7 +98,7 @@ async fn read(e: &Engine, id: &str) -> Result<(Schedule, UpdateVersion), Error> 
     let (meta, bytes) = match e.get_bytes(&key(e, id)).await {
         Ok(found) => found,
         Err(err) => {
-            let mapped = storage(err);
+            let mapped = e.fail_storage(err);
             if mapped.0 == StatusCode::NOT_FOUND {
                 return Err((
                     StatusCode::NOT_FOUND,
@@ -131,21 +131,24 @@ async fn write(e: &Engine, schedule: &Schedule, mode: PutMode) -> Result<(), Err
         Ok(_) => Ok(()),
         Err(error) => {
             if local::is_durability_error(&error) {
-                return Err(storage(error));
+                return Err(e.fail_storage(error));
             }
             if let Ok((actual, _)) = read(&e.reconciliation(), &schedule.id).await
                 && actual.revision == schedule.revision
             {
                 return Ok(());
             }
-            Err(storage(error))
+            Err(e.fail_storage(error))
         }
     }
 }
 async fn list(e: &Engine) -> Result<Vec<Schedule>, Error> {
     let prefix = Key::from(format!("{}/schedules", e.prefix));
     let expected = format!("{prefix}/");
-    let objects: Vec<_> = e.list_objects(&prefix).await.map_err(storage)?;
+    let objects: Vec<_> = e
+        .list_objects(&prefix)
+        .await
+        .map_err(|error| e.fail_storage(error))?;
     let mut schedules = Vec::new();
     for object in objects {
         let path = object.location.to_string();
@@ -405,7 +408,10 @@ async fn tick_one(e: &Engine, id: &str) -> Result<(), Error> {
 pub(super) async fn tick(e: &Engine, handlers: &[String]) -> Result<(), Error> {
     let prefix = Key::from(format!("{}/schedules", e.prefix));
     let expected = format!("{prefix}/");
-    let objects: Vec<_> = e.list_objects(&prefix).await.map_err(storage)?;
+    let objects: Vec<_> = e
+        .list_objects(&prefix)
+        .await
+        .map_err(|error| e.fail_storage(error))?;
     let candidates: Vec<_> = objects
         .iter()
         .filter_map(|object| {

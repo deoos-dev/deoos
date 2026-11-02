@@ -76,7 +76,7 @@ impl Engine {
             Err(error) => {
                 // Lost responses may hide a successful create. Never overwrite/recreate this key.
                 if local::is_durability_error(&error) {
-                    return Err(storage(error));
+                    return Err(self.fail_storage(error));
                 }
                 let reconcile = self.reconciliation();
                 if let Ok((_, actual)) = reconcile.get_bytes(&key).await
@@ -91,7 +91,7 @@ impl Engine {
                 {
                     return Ok(());
                 }
-                Err(storage(error))
+                Err(self.fail_storage(error))
             }
         }
     }
@@ -99,7 +99,7 @@ impl Engine {
     async fn retire_active(&self, key: &Key) -> Result<(), (StatusCode, String)> {
         match self.delete_object(key).await {
             Ok(()) | Err(object_store::Error::NotFound { .. }) => Ok(()),
-            Err(error) => Err(storage(error)),
+            Err(error) => Err(self.fail_storage(error)),
         }
     }
 
@@ -162,7 +162,7 @@ impl Engine {
         let (_, bytes) = match self.get_bytes(key).await {
             Ok(result) => result,
             Err(object_store::Error::NotFound { .. }) => return Ok(None),
-            Err(error) => return Err(storage(error)),
+            Err(error) => return Err(self.fail_storage(error)),
         };
         let intent: ActiveIntent =
             serde_json::from_slice(&bytes).map_err(|_| conflict("invalid stored active intent"))?;
@@ -221,7 +221,10 @@ impl Engine {
     ) -> Result<Vec<(String, ObjectMeta)>, (StatusCode, String)> {
         let prefix = Key::from(format!("{}/active", self.prefix));
         let expected_prefix = format!("{prefix}/");
-        let objects: Vec<_> = self.list_objects(&prefix).await.map_err(storage)?;
+        let objects: Vec<_> = self
+            .list_objects(&prefix)
+            .await
+            .map_err(|error| self.fail_storage(error))?;
         let mut candidates = Vec::new();
         for object in objects {
             // S3 LIST uses a raw prefix and can include active-index.json or active-other.
@@ -247,7 +250,7 @@ impl Engine {
                 Ok(true)
             }
             Err(object_store::Error::NotFound { .. }) => Ok(false),
-            Err(error) => Err(storage(error)),
+            Err(error) => Err(self.fail_storage(error)),
         }
     }
 
@@ -268,7 +271,7 @@ impl Engine {
         let occupied = self
             .list_objects(&prefix)
             .await
-            .map_err(storage)?
+            .map_err(|error| self.fail_storage(error))?
             .iter()
             .any(|object| object.location.as_ref().starts_with(&expected_prefix));
         if occupied {
@@ -292,10 +295,10 @@ impl Engine {
             Err(error) => {
                 // Another initializer or a lost response may have committed the sentinel.
                 if local::is_durability_error(&error) {
-                    return Err(storage(error));
+                    return Err(self.fail_storage(error));
                 }
                 if !self.reconciliation().active_initialized(&sentinel).await? {
-                    return Err(storage(error));
+                    return Err(self.fail_storage(error));
                 }
             }
         }

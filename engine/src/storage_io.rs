@@ -117,7 +117,7 @@ impl Engine {
                 .storage_deadline
                 .is_some_and(|deadline| deadline <= Instant::now())
         {
-            return Err(storage(self.deadline_error()));
+            return Err(self.fail_storage(self.deadline_error()));
         }
         Ok(())
     }

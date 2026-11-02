@@ -13,6 +13,7 @@ test-local: build
 	docker compose up -d
 	ENGINE_BINARY="$(CURDIR)/engine/target/release/deoos-server" $(TEST_PYTHON) tests/two_modes.py rustfs
 	ENGINE_BINARY="$(CURDIR)/engine/target/release/deoos-server" $(TEST_PYTHON) tests/storage_checks.py
+	ENGINE_BINARY="$(CURDIR)/engine/target/release/deoos-server" $(TEST_PYTHON) tests/error_guide.py
 
 test-aws: build
 	ENGINE_BINARY="$(CURDIR)/engine/target/release/deoos-server" $(TEST_PYTHON) tests/two_modes.py aws

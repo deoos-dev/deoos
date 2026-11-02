@@ -278,8 +278,10 @@ with Client(provider="azure", bucket="fake-container",
     try:
         client.inspect("review-task")
     except EngineError as error:
-        assert error.status == 503
-        assert str(error) == "503: storage unavailable; retry shortly and check credentials, endpoint, and bucket"
+        assert error.status in (401, 403), error
+        assert error.code == "STORAGE_CREDENTIALS", error
+        assert "https://deoos.dev/errors#STORAGE_CREDENTIALS" in str(error), error
+        assert "sig=" not in str(error) and "review-runtime-canary" not in str(error), error
     else:
         raise AssertionError("fake provider rejection unexpectedly succeeded")
 '''
@@ -290,7 +292,7 @@ with Client(provider="azure", bucket="fake-container",
         assert any(canary in path for path in received), "fake provider never received the SAS canary"
         assert canary not in result.stdout and canary not in result.stderr, "runtime error leaked the SAS canary"
         return {"passed": True, "provider": "fake Azure loopback endpoint",
-                "provider_status": 403, "public_sdk_status": 503,
+                "provider_status": 403, "public_sdk_status": 403,
                 "stdout_and_stderr_redacted": True}
     finally:
         server.shutdown()

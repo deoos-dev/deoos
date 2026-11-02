@@ -21,9 +21,11 @@ use uuid::Uuid;
 const PROTOCOL_VERSION: u32 = 3;
 mod active;
 mod discovery;
+mod errors;
 mod local;
 mod qualification;
 mod storage_io;
+pub use errors::{guide as error_guide, text as error_text};
 // Keep a failed filesystem durability barrier distinguishable after API-error
 // conversion, so an outer operation cannot acknowledge it through readback.
 const DURABILITY_FAILURE: StatusCode = StatusCode::INSUFFICIENT_STORAGE;
@@ -32,6 +34,7 @@ const DURABILITY_FAILURE: StatusCode = StatusCode::INSUFFICIENT_STORAGE;
 pub struct Engine {
     store: Arc<dyn ObjectStore>,
     prefix: String,
+    storage_target: String,
     lease_ms: u64,
     discovery: Arc<std::sync::Mutex<discovery::Hints>>,
     active_ready: Arc<tokio::sync::Mutex<bool>>,
@@ -226,33 +229,16 @@ fn normalized_json(value: Value) -> Value {
         other => other,
     }
 }
-fn storage(err: object_store::Error) -> (StatusCode, String) {
-    if local::is_durability_error(&err) {
-        eprintln!("storage: local durability barrier failed");
-        return (DURABILITY_FAILURE, "local durability barrier failed; operation outcome uncertain; check disk space, filesystem support and write permissions".into());
-    }
-    if matches!(&err, object_store::Error::Generic { store: "DEOOS", .. }) {
-        return (
-                StatusCode::SERVICE_UNAVAILABLE,
-            "storage deadline exceeded; write outcome uncertain; retry the same operation id and do not assume the write failed".into(),
-        );
-    }
-    match err {
-        object_store::Error::NotFound { .. } => (StatusCode::NOT_FOUND, "not found".into()),
-        object_store::Error::Precondition { .. } | object_store::Error::AlreadyExists { .. } => {
-            conflict("conditional write conflict")
-        }
-        _ => {
-            eprintln!("storage: {}", qualification::error_kind(&err));
-            (
-                StatusCode::SERVICE_UNAVAILABLE,
-                "storage unavailable; retry shortly and check credentials, endpoint, and bucket"
-                    .into(),
-            )
-        }
-    }
+// Used by the macOS durability tests. Other builds keep the mapper for that call.
+#[cfg_attr(not(all(test, target_os = "macos")), allow(dead_code))]
+pub(crate) fn storage(err: object_store::Error) -> (StatusCode, String) {
+    errors::storage_failure(&err, "")
 }
 impl Engine {
+    fn fail_storage(&self, err: object_store::Error) -> (StatusCode, String) {
+        errors::storage_failure(&err, &self.storage_target)
+    }
+
     /// Check the storage primitives used by the execution protocol in an isolated namespace.
     pub async fn check_storage(&self) -> Result<Value, String> {
         qualification::check(self.store.as_ref(), &self.prefix).await
@@ -268,7 +254,7 @@ impl Engine {
         let (meta, bytes) = match self.get_bytes(&self.key(id)).await {
             Ok(found) => found,
             Err(err) => {
-                let mapped = storage(err);
+                let mapped = self.fail_storage(err);
                 if mapped.0 == StatusCode::NOT_FOUND {
                     return Err((
                         StatusCode::NOT_FOUND,
@@ -298,7 +284,7 @@ impl Engine {
             }
             Err(err) => {
                 if local::is_durability_error(&err) {
-                    return Err(storage(err));
+                    return Err(self.fail_storage(err));
                 }
                 // Reconcile an uncertain response. A revision is unique to this exact proposed write.
                 if let Ok((actual, _)) = self.reconciliation().read(&t.id).await
@@ -307,14 +293,17 @@ impl Engine {
                     self.after_state_write(&actual).await;
                     return Ok(());
                 }
-                Err(storage(err))
+                Err(self.fail_storage(err))
             }
         }
     }
     async fn tasks(&self) -> Result<Value, (StatusCode, String)> {
         let prefix = Key::from(format!("{}/tasks", self.prefix));
         let expected = format!("{prefix}/");
-        let objects: Vec<_> = self.list_objects(&prefix).await.map_err(storage)?;
+        let objects: Vec<_> = self
+            .list_objects(&prefix)
+            .await
+            .map_err(|err| self.fail_storage(err))?;
         let mut ids: Vec<_> = objects
             .into_iter()
             .filter_map(|object| {
@@ -454,7 +443,7 @@ impl Engine {
         let (_, bytes) = self
             .get_bytes(&Key::parse(key).map_err(|_| conflict("invalid stored payload key"))?)
             .await
-            .map_err(storage)?;
+            .map_err(|err| self.fail_storage(err))?;
         serde_json::from_slice(&bytes).map_err(|_| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -498,7 +487,7 @@ impl Engine {
                 let data = Bytes::from(serde_json::to_vec(&request.value).unwrap());
                 if let Err(error) = self.put_object(&result_key, data, PutMode::Create).await {
                     if local::is_durability_error(&error) {
-                        return Err(storage(error));
+                        return Err(self.fail_storage(error));
                     }
                     match self.reconciliation().payload(result_key.as_ref()).await {
                         Ok(existing) => {
@@ -508,7 +497,7 @@ impl Engine {
                                 ));
                             }
                         }
-                        Err(_) => return Err(storage(error)),
+                        Err(_) => return Err(self.fail_storage(error)),
                     }
                 }
                 uploaded = true;
@@ -651,7 +640,13 @@ impl Engine {
                         return if existing == &operation_fingerprint {
                             Ok(Json(t))
                         } else {
-                            Err(conflict("checkpoint definition changed"))
+                            Err(errors::guide(
+                                StatusCode::CONFLICT,
+                                "WORKFLOW_NONDETERMINISTIC",
+                                &format!("checkpoint definition changed for step '{name}'"),
+                                "replay called this step with a different kind, revision, or definition than the one already committed. A workflow must make the same checkpoint calls on every attempt",
+                                "keep the step name, kind, and revision stable for this task id. To run new code, submit a new id with `python -m deoos submit NEW_ID HANDLER '{}'`",
+                            ))
                         };
                     }
                     if t.steps.contains_key(name) {
@@ -679,15 +674,17 @@ impl Engine {
                         Ok(_) => {}
                         Err(object_store::Error::AlreadyExists { .. })
                         | Err(object_store::Error::Precondition { .. }) => {
-                            let (_, existing) =
-                                self.get_bytes(&result_key).await.map_err(storage)?;
+                            let (_, existing) = self
+                                .get_bytes(&result_key)
+                                .await
+                                .map_err(|err| self.fail_storage(err))?;
                             let existing_value: Value = serde_json::from_slice(&existing)
                                 .map_err(|_| conflict("invalid existing result"))?;
                             if normalized_json(existing_value) != normalized_json(m.value.clone()) {
                                 return Err(conflict("operation ID reused with different result"));
                             }
                         }
-                        Err(e) => return Err(storage(e)),
+                        Err(e) => return Err(self.fail_storage(e)),
                     }
                     t.steps.insert(name.into(), result_key.to_string());
                 }
@@ -1027,7 +1024,7 @@ async fn result(
     let (_, bytes) = e
         .get_bytes(&Key::parse(key).map_err(|_| conflict("invalid stored result key"))?)
         .await
-        .map_err(storage)?;
+        .map_err(|err| e.fail_storage(err))?;
     Ok(Json(serde_json::from_slice(&bytes).map_err(|_| {
         (StatusCode::INTERNAL_SERVER_ERROR, "invalid result".into())
     })?))
@@ -1052,9 +1049,15 @@ impl Engine {
     pub fn from_config(c: Config) -> Result<Self, String> {
         let lease_ms = c.lease_ms.unwrap_or(30000);
         if lease_ms < 1000 {
-            return Err("lease_ms must be >= 1000".into());
+            return Err(errors::text(
+                "CONFIG_LEASE",
+                "lease_ms must be >= 1000",
+                "LEASE_MS is the recovery lease and must be at least one second",
+                "set LEASE_MS to a number of milliseconds >= 1000, or omit it to use the default 30000. Example: LEASE_MS=2000",
+            ));
         }
-        after_ms(lease_ms).map_err(|(_, message)| message)?;
+        after_ms(lease_ms)
+            .map_err(|(_, message)| errors::annotate(StatusCode::BAD_REQUEST, message).1)?;
         let timeout = format!("{}ms", (lease_ms / 8).min(2000));
         let retry = object_store::RetryConfig {
             max_retries: 2,
@@ -1069,6 +1072,28 @@ impl Engine {
             .provider
             .or_else(|| std::env::var("DEOOS_STORAGE_PROVIDER").ok())
             .unwrap_or_else(|| "s3".into());
+        let bucket_name = c.bucket.clone();
+        let endpoint_hint = match provider.as_str() {
+            "azure" => c
+                .endpoint
+                .clone()
+                .or_else(|| std::env::var("AZURE_STORAGE_ENDPOINT").ok()),
+            "s3" => c
+                .endpoint
+                .clone()
+                .or_else(|| std::env::var("AWS_ENDPOINT").ok()),
+            _ => c.endpoint.clone(),
+        };
+        let directory_hint = c
+            .directory
+            .clone()
+            .or_else(|| std::env::var("DEOOS_STORAGE_DIRECTORY").ok());
+        let storage_target = errors::storage_target(
+            &provider,
+            &bucket_name,
+            endpoint_hint.as_deref(),
+            directory_hint.as_deref(),
+        );
         let store: Arc<dyn ObjectStore> = match provider.as_str() {
             "filesystem" => {
                 if !c.bucket.is_empty()
@@ -1079,21 +1104,50 @@ impl Engine {
                     || c.session_token.is_some()
                     || c.allow_http.is_some()
                 {
-                    return Err("filesystem storage uses directory, not bucket or cloud credential/endpoint options".into());
+                    return Err(errors::text(
+                        "CONFIG_FILESYSTEM",
+                        "filesystem storage uses directory, not bucket or cloud credential/endpoint options",
+                        "provider=filesystem is the local adapter and does not take a bucket, region, endpoint, or cloud keys",
+                        "set DEOOS_STORAGE_PROVIDER=filesystem and DEOOS_STORAGE_DIRECTORY to a private directory. For RustFS or S3, set DEOOS_STORAGE_PROVIDER=s3 and DEOOS_STORAGE_BUCKET",
+                    ));
                 }
                 let directory = c
                     .directory
                     .or_else(|| std::env::var("DEOOS_STORAGE_DIRECTORY").ok())
                     .filter(|value| !value.is_empty())
-                    .ok_or("filesystem storage requires directory or DEOOS_STORAGE_DIRECTORY")?;
-                let absolute = std::path::absolute(directory)
-                    .map_err(|_| "invalid local storage directory")?;
-                local::open(absolute)
-                    .map_err(|error| format!("cannot initialize filesystem storage: {error}"))?
+                    .ok_or_else(|| {
+                        errors::text(
+                            "CONFIG_DIRECTORY",
+                            "filesystem storage requires directory or DEOOS_STORAGE_DIRECTORY",
+                            "provider=filesystem stores task state on a local disk",
+                            "set DEOOS_STORAGE_DIRECTORY to a private writable directory, or use DEOOS_STORAGE_PROVIDER=s3 with DEOOS_STORAGE_BUCKET",
+                        )
+                    })?;
+                let absolute = std::path::absolute(directory).map_err(|_| {
+                    errors::text(
+                        "CONFIG_DIRECTORY",
+                        "invalid local storage directory",
+                        "the directory path could not be resolved",
+                        "set DEOOS_STORAGE_DIRECTORY to an existing private directory",
+                    )
+                })?;
+                local::open(absolute).map_err(|error| {
+                    errors::text(
+                        "CONFIG_DIRECTORY_INIT",
+                        &format!("cannot initialize filesystem storage: {error}"),
+                        "the directory is missing, not private, or not a supported filesystem",
+                        "create DEOOS_STORAGE_DIRECTORY and make it writable only by this user. On macOS the experimental adapter expects APFS",
+                    )
+                })?
             }
             "s3" => {
                 if c.directory.is_some() {
-                    return Err("directory requires provider=filesystem".into());
+                    return Err(errors::text(
+                        "CONFIG_DIRECTORY",
+                        "directory requires provider=filesystem",
+                        "DEOOS_STORAGE_DIRECTORY is only for the filesystem provider",
+                        "set DEOOS_STORAGE_PROVIDER=filesystem, or unset DEOOS_STORAGE_DIRECTORY and set DEOOS_STORAGE_BUCKET for S3 or RustFS",
+                    ));
                 }
                 let mut builder = AmazonS3Builder::from_env()
                     .with_bucket_name(c.bucket)
@@ -1128,27 +1182,44 @@ impl Engine {
                 if let Some(v) = c.allow_http {
                     builder = builder.with_allow_http(v);
                 }
-                Arc::new(builder.build().map_err(
-                    |_| "invalid S3 configuration; check bucket, region, endpoint and credentials",
-                )?)
+                Arc::new(builder.build().map_err(|_| {
+                    errors::text(
+                        "CONFIG_S3",
+                        "invalid S3 configuration; check bucket, region, endpoint and credentials",
+                        "the S3 client rejected the bucket, region, endpoint, or credential settings before any request",
+                        "set DEOOS_STORAGE_BUCKET, AWS_REGION, AWS_ACCESS_KEY_ID, and AWS_SECRET_ACCESS_KEY. For RustFS also set AWS_ENDPOINT=http://127.0.0.1:19000 and AWS_ALLOW_HTTP=true. Run `deoos-server --check-storage`",
+                    )
+                })?)
             }
             "gcs" | "azure" => {
                 if c.directory.is_some() {
-                    return Err("directory requires provider=filesystem".into());
+                    return Err(errors::text(
+                        "CONFIG_DIRECTORY",
+                        "directory requires provider=filesystem",
+                        "DEOOS_STORAGE_DIRECTORY is only for the filesystem provider",
+                        "set DEOOS_STORAGE_PROVIDER=filesystem, or unset DEOOS_STORAGE_DIRECTORY and set DEOOS_STORAGE_BUCKET",
+                    ));
                 }
                 if c.region.is_some()
                     || c.access_key_id.is_some()
                     || c.secret_access_key.is_some()
                     || c.session_token.is_some()
                 {
-                    return Err("S3 credential/region options require provider=s3; use native provider credentials".into());
+                    return Err(errors::text(
+                        "CONFIG_CREDENTIALS",
+                        "S3 credential/region options require provider=s3; use native provider credentials",
+                        "AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, and AWS_REGION were passed to a GCS or Azure client",
+                        "for S3 or RustFS set DEOOS_STORAGE_PROVIDER=s3. For GCS use GOOGLE_SERVICE_ACCOUNT_PATH. For Azure use AZURE_STORAGE_ACCOUNT_NAME and a key or SAS",
+                    ));
                 }
                 if provider == "gcs" {
                     if c.endpoint.is_some() || c.allow_http.is_some() {
-                        return Err(
-                            "GCS endpoint/transport options must use native provider configuration"
-                                .into(),
-                        );
+                        return Err(errors::text(
+                            "CONFIG_GCS",
+                            "GCS endpoint/transport options must use native provider configuration",
+                            "endpoint and allow_http are S3 settings",
+                            "unset AWS_ENDPOINT and AWS_ALLOW_HTTP, and set GOOGLE_SERVICE_ACCOUNT_PATH to a service-account JSON file",
+                        ));
                     }
                     Arc::new(
                         GoogleCloudStorageBuilder::from_env()
@@ -1157,7 +1228,12 @@ impl Engine {
                             .with_config(object_store::gcp::GoogleConfigKey::Client(object_store::ClientConfigKey::ConnectTimeout), timeout.clone())
                             .with_bucket_name(c.bucket)
                             .build()
-                            .map_err(|_| "invalid GCS configuration; check bucket and native provider credentials")?,
+                            .map_err(|_| errors::text(
+                                "CONFIG_GCS",
+                                "invalid GCS configuration; check bucket and native provider credentials",
+                                "the GCS client rejected the bucket or service account before any request",
+                                "set DEOOS_STORAGE_BUCKET and GOOGLE_SERVICE_ACCOUNT_PATH to a standard service-account JSON file",
+                            ))?,
                     )
                 } else {
                     let mut builder = MicrosoftAzureBuilder::from_env()
@@ -1181,10 +1257,24 @@ impl Engine {
                     if let Some(v) = c.allow_http {
                         builder = builder.with_allow_http(v);
                     }
-                    Arc::new(builder.build().map_err(|_| "invalid Azure configuration; check account, container, endpoint and native provider credentials")?)
+                    Arc::new(builder.build().map_err(|_| {
+                        errors::text(
+                            "CONFIG_AZURE",
+                            "invalid Azure configuration; check account, container, endpoint and native provider credentials",
+                            "the Azure client rejected the account, container, endpoint, or credential settings before any request",
+                            "set AZURE_STORAGE_ACCOUNT_NAME and exactly one of AZURE_STORAGE_ACCOUNT_KEY or AZURE_STORAGE_SAS_KEY. Use an https endpoint with no query string. For RustFS set DEOOS_STORAGE_PROVIDER=s3 instead",
+                        )
+                    })?)
                 }
             }
-            _ => return Err("provider must be s3, gcs, azure or filesystem".into()),
+            _ => {
+                return Err(errors::text(
+                    "CONFIG_PROVIDER",
+                    "provider must be s3, gcs, azure or filesystem",
+                    "DEOOS_STORAGE_PROVIDER is not a supported store",
+                    "set DEOOS_STORAGE_PROVIDER to s3 (RustFS and S3), gcs, azure, or filesystem",
+                ));
+            }
         };
         let prefix = c.prefix.unwrap_or("deoos".into());
         if prefix.is_empty()
@@ -1193,9 +1283,12 @@ impl Engine {
                 .any(|part| part.is_empty() || part == "." || part == "..")
             || Key::parse(&prefix).is_err()
         {
-            return Err(
-                "prefix must be a nonempty namespace without empty or dot components".into(),
-            );
+            return Err(errors::text(
+                "CONFIG_PREFIX",
+                "prefix must be a nonempty namespace without empty or dot components",
+                "EXECUTION_PREFIX is the object-key namespace for this deployment",
+                "set EXECUTION_PREFIX to a path such as deoos or deoos/prod, with no empty, '.' or '..' segments",
+            ));
         }
         use tracing_subscriber::prelude::*;
         let storage_control = Arc::new(storage_io::StorageControl::new(
@@ -1208,6 +1301,7 @@ impl Engine {
         Ok(Self {
             store,
             prefix,
+            storage_target,
             lease_ms,
             discovery: Arc::new(std::sync::Mutex::new(discovery::Hints::default())),
             active_ready: Arc::new(tokio::sync::Mutex::new(false)),
@@ -1230,7 +1324,14 @@ impl Engine {
                         Err(error)
                     }
                 })
-                .map_err(|_| "DEOOS_STORAGE_BUCKET required")?
+                .map_err(|_| {
+                    errors::text(
+                        "CONFIG_BUCKET_REQUIRED",
+                        "DEOOS_STORAGE_BUCKET required",
+                        "this process has no bucket name and is not using filesystem storage",
+                        "export DEOOS_STORAGE_BUCKET. `make dev` uses deoos-dev and creates it. For a local disk set DEOOS_STORAGE_PROVIDER=filesystem and DEOOS_STORAGE_DIRECTORY",
+                    )
+                })?
         };
         let directory = if provider == "filesystem" {
             std::env::var("DEOOS_STORAGE_DIRECTORY").ok()
@@ -1252,7 +1353,14 @@ impl Engine {
                 .ok()
                 .map(|s| s.parse())
                 .transpose()
-                .map_err(|_| "invalid LEASE_MS")?,
+                .map_err(|_| {
+                    errors::text(
+                        "CONFIG_LEASE",
+                        "invalid LEASE_MS",
+                        "LEASE_MS must be a whole number of milliseconds",
+                        "set LEASE_MS to an integer >= 1000, for example LEASE_MS=2000, or unset it to use 30000",
+                    )
+                })?,
         })
     }
     pub async fn dispatch(
@@ -1282,7 +1390,7 @@ impl Engine {
                     "admission_rejections",
                     "storage claim admission busy; retry with backoff",
                 );
-                (
+                errors::annotate(
                     StatusCode::SERVICE_UNAVAILABLE,
                     "storage claim admission busy; retry with backoff".into(),
                 )
@@ -1307,7 +1415,7 @@ impl Engine {
                             "storage busy; retry with backoff"
                         },
                     );
-                    (
+                    errors::annotate(
                         StatusCode::SERVICE_UNAVAILABLE,
                         if renewal {
                             "storage renewal admission busy"
@@ -1345,6 +1453,10 @@ impl Engine {
             .dispatch_inner(method, path, data, renewal)
             .with_subscriber(self.storage_tracing.clone())
             .await;
+        let result = match result {
+            Ok(value) => Ok(value),
+            Err((status, message)) => Err(errors::annotate(status, message)),
+        };
         drop(permit);
         if let Err((code, message)) = &result
             && *code == StatusCode::SERVICE_UNAVAILABLE
@@ -1364,8 +1476,12 @@ impl Engine {
             && data.get("protocol_version").and_then(Value::as_u64)
                 != Some(u64::from(PROTOCOL_VERSION))
         {
-            return Err(conflict(
-                "protocol_version 3 required for mutations; upgrade the SDK so it matches this server",
+            return Err(errors::guide(
+                StatusCode::CONFLICT,
+                "PROTOCOL_MISMATCH",
+                "protocol_version 3 required for mutations",
+                "this client and deoos-server are different versions. The server speaks protocol 3",
+                "install the Python wheel and the Node package from the same GitHub release archive as `deoos-server --version`. Do not install deoos from PyPI or the npm registry. Upgrade so this SDK and the server match",
             ));
         }
         if method == "GET" && path == "/info" {

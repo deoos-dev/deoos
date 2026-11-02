@@ -84,6 +84,7 @@ jobs:
           PYTHON
           python tests/two_modes.py rustfs
           python tests/storage_checks.py
+          python tests/error_guide.py
           python tests/discovery_contract.py
           python tests/active_discovery_contract.py
           python packaging/build_package.py --package-only
