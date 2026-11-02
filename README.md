@@ -215,7 +215,7 @@ python -m deoos submit TASK_ID HANDLER '{"key":"value"}'
 python -m deoos signal TASK_ID SIGNAL_NAME true
 ```
 
-`submit`, `signal`, and `feedback` are in the 0.8.0 CLI. A refused connection prints `cannot reach engine at <url>; run make dev`. `AGENTS.md` is the kill-and-resume check for this server. `make test-dev` runs that check against the real engine.
+`submit`, `signal`, and `feedback` are in the 0.8.0 CLI. A refused connection prints `ENGINE_UNREACHABLE` (`cannot reach engine at <url>`) and tells you to run `make dev`. Other failures use the same shape: what happened, the likely cause, a concrete fix, a stable code, and `https://deoos.dev/errors#CODE`. The catalog is [docs/errors.md](docs/errors.md). `AGENTS.md` is the kill-and-resume check for this server. `make test-dev` runs that check against the real engine.
 
 ## Agents
 

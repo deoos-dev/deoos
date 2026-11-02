@@ -8,12 +8,8 @@ class NativeEngine:
         try:
             self.lib = ctypes.CDLL(path)
         except OSError as error:
-            raise RuntimeError(
-                'Cannot load the DEOOS engine in library mode. Install the prebuilt Python '
-                'wheel from the release for your operating system and CPU architecture. If '
-                'DEOOS_NATIVE_LIBRARY is set, check that it points to a compatible '
-                'library. To connect in server mode, use Client.remote(url, token).'
-            ) from error
+            from .errors import native_library
+            raise RuntimeError(native_library()) from error
         self.lib.deoos_open.argtypes=[ctypes.c_char_p,ctypes.POINTER(ctypes.c_void_p)]
         self.lib.deoos_open.restype=ctypes.c_void_p
         self.lib.deoos_request.argtypes=[ctypes.c_void_p,ctypes.c_char_p]

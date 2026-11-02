@@ -10,12 +10,23 @@ import threading
 import time
 import urllib.request
 import urllib.error
+import re
 import uuid
 from collections.abc import Mapping
+
+from .errors import (
+    bucket_required, engine_unreachable, engine_url_required, engine_wrong_url,
+    guide, invalid_name, mode_invalid, native_library, protocol_mismatch,
+)
+
+_CODE = re.compile(r"\[([A-Z][A-Z0-9_]+)\]")
 
 class EngineError(RuntimeError):
     def __init__(self, status, message):
         self.status = status
+        self.message = message
+        found = _CODE.search(message or "")
+        self.code = found.group(1) if found else None
         super().__init__(f"{status}: {message}")
 
 class ChildFailed(RuntimeError):
@@ -28,20 +39,26 @@ class ChildFailed(RuntimeError):
 class _Suspended(BaseException):
     pass
 
+def _foreign_body(body):
+    sample = (body or "").lstrip()[:800].lower()
+    return sample.startswith("<") or "<html" in sample or "<error>" in sample
+
 def _valid_step(name):
     if (not isinstance(name, str) or not name or len(name) > 128
             or name in (".", "..")
             or not name.isascii()
             or any(not (char.isalnum() or char in "_.-") for char in name)):
-        raise ValueError(
-            "invalid name; use 1-128 ASCII letters, digits, '.', '_' or '-', "
-            "and not '.' or '..'. Task ids, handlers, steps, signals and operation ids share this rule."
-        )
+        raise ValueError(invalid_name())
 
 def _safe_integer(value, name, *, minimum=0):
     if (isinstance(value, bool) or not isinstance(value, int)
             or value < minimum or value > 9_007_199_254_740_991):
-        raise ValueError(f"{name} must be a safe integer >= {minimum}")
+        raise ValueError(guide(
+            "INVALID_INTEGER",
+            f"{name} must be a safe integer >= {minimum}",
+            f"{name} was missing, a boolean, a float, or outside the safe integer range",
+            f"pass an integer >= {minimum} and <= 9007199254740991",
+        ))
 
 class Client:
     """Library mode by default; remote() explicitly selects server mode."""
@@ -56,20 +73,26 @@ class Client:
             config["provider"] = provider
             if provider == "filesystem":
                 if bucket is not None:
-                    raise ValueError("filesystem storage uses directory, not bucket")
+                    raise ValueError(guide(
+                        "CONFIG_FILESYSTEM",
+                        "filesystem storage uses directory, not bucket",
+                        "provider=filesystem does not take a bucket",
+                        "pass directory or set DEOOS_STORAGE_DIRECTORY, or set DEOOS_STORAGE_PROVIDER=s3 and DEOOS_STORAGE_BUCKET",
+                    ))
                 directory = config.get("directory") or os.environ.get("DEOOS_STORAGE_DIRECTORY")
                 if not directory:
-                    raise ValueError("filesystem storage requires directory or DEOOS_STORAGE_DIRECTORY")
+                    raise ValueError(guide(
+                        "CONFIG_DIRECTORY",
+                        "filesystem storage requires directory or DEOOS_STORAGE_DIRECTORY",
+                        "provider=filesystem stores task state on a local disk",
+                        "set DEOOS_STORAGE_DIRECTORY to a private writable directory",
+                    ))
                 config["directory"] = os.fspath(directory)
             else:
                 config["bucket"] = bucket or os.environ.get("DEOOS_STORAGE_BUCKET") or (
                     os.environ.get("AWS_BUCKET") if provider == "s3" else None)
                 if not config["bucket"]:
-                    raise ValueError(
-                        "bucket or DEOOS_STORAGE_BUCKET is required for library mode. "
-                        "Set DEOOS_STORAGE_BUCKET, or set ENGINE_URL to use a running server "
-                        "(`make dev` from a checkout)."
-                    )
+                    raise ValueError(bucket_required())
             config["prefix"] = prefix or os.environ.get("EXECUTION_PREFIX", "deoos")
             if "lease_ms" not in config and "LEASE_MS" in os.environ:
                 config["lease_ms"] = int(os.environ["LEASE_MS"])
@@ -78,7 +101,12 @@ class Client:
     @classmethod
     def remote(cls, url, token=None):
         if not url:
-            raise ValueError("server URL is required")
+            raise ValueError(guide(
+                "ENGINE_URL_REQUIRED",
+                "server URL is required",
+                "Client.remote was called without a URL",
+                "pass the deoos-server origin, usually http://127.0.0.1:7331 from `make dev`",
+            ))
         return cls(url, token=token)
 
     def __enter__(self):
@@ -96,17 +124,12 @@ class Client:
             try:
                 info = self.request("/info")
             except EngineError as error:
-                if error.status == 404:
-                    raise EngineError(
-                        409,
-                        "engine protocol version 3 is required; upgrade deoos so this SDK and the server match",
-                    ) from error
+                if error.status == 404 and not error.code:
+                    raise EngineError(409, protocol_mismatch(None)) from error
                 raise
-            if not isinstance(info, dict) or info.get("protocol_version") != 3:
-                raise EngineError(
-                    409,
-                    "engine protocol version 3 is required; upgrade deoos so this SDK and the server match",
-                )
+            reported = info.get("protocol_version") if isinstance(info, dict) else None
+            if not isinstance(info, dict) or reported != 3:
+                raise EngineError(409, protocol_mismatch(reported))
             if not isinstance(data, dict):
                 raise TypeError("mutation data must be an object")
             data = {**data, "protocol_version": 3}
@@ -119,15 +142,18 @@ class Client:
         req = urllib.request.Request(self.url + path, data=body, headers=headers)
         try:
             with urllib.request.urlopen(req, timeout=10) as response:
-                return json.load(response)
+                raw = response.read()
+            try:
+                return json.loads(raw.decode())
+            except json.JSONDecodeError as error:
+                raise EngineError(502, engine_wrong_url(self.url)) from error
         except urllib.error.HTTPError as error:
-            detail = error.read().decode()
+            detail = error.read().decode(errors="replace")
+            if _foreign_body(detail):
+                raise EngineError(error.code, engine_wrong_url(self.url)) from error
             raise EngineError(error.code, detail or error.reason) from error
         except urllib.error.URLError as error:
-            raise OSError(
-                f"cannot reach engine at {self.url}; check ENGINE_URL and that deoos-server is running "
-                "(`make dev` from a checkout)"
-            ) from error
+            raise OSError(engine_unreachable(self.url)) from error
 
     def submit(self, task_id, handler, inputs, max_attempts=3, retry_ms=0):
         return self.request("/tasks", dict(id=task_id, handler=handler, inputs=inputs,
@@ -291,7 +317,7 @@ class Client:
         if task is None:
             return False
         if task.get("version") != 3:
-            raise RuntimeError("unsupported engine protocol version")
+            raise RuntimeError(protocol_mismatch(task.get("version")))
         ctx = Context(self, task)
         stop = threading.Event()
         def heartbeat():
@@ -339,7 +365,12 @@ class Context:
         if self.suspended:
             raise _Suspended()
         if self.ownership_error is not None:
-            raise RuntimeError("ownership renewal failed; stop work") from self.ownership_error
+            raise RuntimeError(guide(
+                "OWNERSHIP_LOST",
+                "ownership renewal failed; stop work",
+                "the lease renewal did not succeed, so this attempt must not commit",
+                "stop this attempt and let a worker claim the task again. Raise LEASE_MS (minimum 1000) if renewals cannot keep up",
+            )) from self.ownership_error
 
     def current_state(self):
         self.check_owner()
@@ -347,7 +378,12 @@ class Context:
         if state.get("status") != "running" or state.get("token") != self.task["token"]:
             error = EngineError(
                 409,
-                "ownership lost or task is no longer running; stop this attempt and let a worker claim it again",
+                guide(
+                    "OWNERSHIP_LOST",
+                    "ownership lost or task is no longer running; stop this attempt and let a worker claim it again",
+                    "the lease ended or another worker claimed the task",
+                    "stop this attempt. A worker can claim the task again after the lease",
+                ),
             )
             self.ownership_error = error
             raise error
@@ -496,13 +532,10 @@ def client_from_environment():
         return Client()
     if mode == "server":
         if not url:
-            raise ValueError(
-                "DEOOS_MODE=server requires ENGINE_URL. Start a server with `make dev` "
-                "and export ENGINE_URL=http://127.0.0.1:7331."
-            )
+            raise ValueError(engine_url_required())
         return Client.remote(url, token)
     if mode:
-        raise ValueError("DEOOS_MODE must be 'library' or 'server'")
+        raise ValueError(mode_invalid())
     if url:
         return Client.remote(url, token)
     return Client(token=token)

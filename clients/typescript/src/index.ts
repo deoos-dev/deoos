@@ -1,6 +1,12 @@
 import { randomUUID, createHash } from 'node:crypto';
 import {createRequire} from 'node:module';
 const require=createRequire(import.meta.url);
+const DOCS='https://deoos.dev/errors#';
+function guide(code:string,what:string,cause:string,fix:string){return `[${code}] ${what} Cause: ${cause} Fix: ${fix} ${DOCS}${code}`;}
+function engineUnreachable(url:string){return guide('ENGINE_UNREACHABLE',`cannot reach engine at ${url}`,'nothing accepted a connection. deoos-server is not running, or ENGINE_URL is the wrong host or port',"from a checkout run `make dev`, then set ENGINE_URL=http://127.0.0.1:7331. `python -m deoos info` should print protocol_version 3");}
+function engineWrongUrl(url:string){return guide('ENGINE_WRONG_URL',`ENGINE_URL ${url} responded but is not a deoos server`,'the URL points at a different service, such as RustFS on port 19000, or the response is not deoos JSON','set ENGINE_URL to the deoos-server origin only, usually http://127.0.0.1:7331 from `make dev`, with no path suffix. The server log prints `deoos-server listening`');}
+function protocolMismatch(reported:unknown){const got=reported==null?'missing':String(reported);return guide('PROTOCOL_MISMATCH',`engine protocol version 3 is required; server reported ${got}`,'this SDK and deoos-server are different versions','install the Python wheel and the Node package from the same GitHub release archive as `deoos-server --version`. Do not install deoos from PyPI or the npm registry. Upgrade so this SDK and the server match');}
+function foreignBody(body:string){const sample=body.trim().slice(0,800).toLowerCase();return sample.startsWith('<')||sample.includes('<html')||sample.includes('<error>');}
 export type StorageConfig = {prefix?:string;lease_ms?:number} & (
   {provider:'filesystem';directory:string;bucket?:never;region?:never;endpoint?:never;access_key_id?:never;secret_access_key?:never;session_token?:never;allow_http?:never}
   | {provider?:'s3'|'gcs'|'azure';bucket:string;directory?:never;region?:string;endpoint?:string;access_key_id?:string;secret_access_key?:string;session_token?:string;allow_http?:boolean}
@@ -46,7 +52,12 @@ export interface WorkerOptions {
   onError?:(error:unknown,taskId?:string)=>'continue'|'propagate'|Promise<'continue'|'propagate'>;
 }
 export class EngineError extends Error {
-  constructor(public status:number, message:string){super(`${status}: ${message}`);this.name="EngineError";}
+  code?:string;
+  constructor(public status:number, message:string){
+    super(`${status}: ${message}`);
+    this.name="EngineError";
+    this.code=message.match(/\[([A-Z][A-Z0-9_]+)\]/)?.[1];
+  }
 }
 class Suspended extends Error {}
 export class ChildFailed extends Error {
@@ -55,9 +66,9 @@ export class ChildFailed extends Error {
   }
 }
 function validStep(name:string){
-  if(typeof name!=='string'||!/^[A-Za-z0-9_.-]{1,128}$/.test(name)||name==='.'||name==='..')throw new Error("invalid name; use 1-128 ASCII letters, digits, '.', '_' or '-', and not '.' or '..'. Task ids, handlers, steps, signals and operation ids share this rule.");
+  if(typeof name!=='string'||!/^[A-Za-z0-9_.-]{1,128}$/.test(name)||name==='.'||name==='..')throw new Error(guide('INVALID_NAME',"invalid name; use 1-128 ASCII letters, digits, '.', '_' or '-', and not '.' or '..'","task ids, handlers, steps, signals, and operation ids share this rule","rename it to 1-128 ASCII letters, digits, '.', '_' or '-', and not '.' or '..'"));
 }
-function safeInteger(value:number,name:string,minimum=0){if(!Number.isSafeInteger(value)||value<minimum)throw new Error(`${name} must be a safe integer >= ${minimum}`);}
+function safeInteger(value:number,name:string,minimum=0){if(!Number.isSafeInteger(value)||value<minimum)throw new Error(guide('INVALID_INTEGER',`${name} must be a safe integer >= ${minimum}`,`${name} was missing or outside the safe integer range`,`pass an integer >= ${minimum} and <= 9007199254740991`));}
 export class Client {
   private native?:NativeHandle;
   public url?:string;
@@ -68,7 +79,7 @@ export class Client {
       try {
         addon=require(process.env.DEOOS_NODE_LIBRARY??'./native/deoos_node.node');
       } catch(error) {
-        throw new Error('Cannot load the DEOOS engine in library mode. Install the prebuilt npm package from the release for your operating system and CPU architecture, using Node 22 or newer. If DEOOS_NODE_LIBRARY is set, check that it points to a compatible addon. To connect in server mode, use Client.remote(url, token).',{cause:error});
+        throw new Error(guide('NODE_LIBRARY','Cannot load the DEOOS engine in library mode','the prebuilt Node addon is missing, or it was built for another operating system, CPU, or Node version','install the Node package from the GitHub release archive for this OS and CPU, using Node 22 or newer. If DEOOS_NODE_LIBRARY is set, point it at deoos_node.node. To use a running server instead, call Client.remote(url, token). Do not install deoos from the npm registry'),{cause:error});
       }
       this.native=new addon.NativeEngine(JSON.stringify({...config,prefix:config.prefix??process.env.EXECUTION_PREFIX??"deoos",lease_ms:config.lease_ms??Number(process.env.LEASE_MS??30000)}));
     }
@@ -78,10 +89,10 @@ export class Client {
     if(data!==undefined){
       let info;
       try{info=await this.request('/info');}catch(error){
-        if(error instanceof EngineError&&error.status===404)throw new EngineError(409,'unsupported engine protocol; expected 3. Upgrade deoos so this SDK and the server match.');
+        if(error instanceof EngineError&&error.status===404&&!error.code)throw new EngineError(409,protocolMismatch(undefined));
         throw error;
       }
-      if(info?.protocol_version!==3)throw new EngineError(409,'unsupported engine protocol; expected 3. Upgrade deoos so this SDK and the server match.');
+      if(info?.protocol_version!==3)throw new EngineError(409,protocolMismatch(info?.protocol_version));
       if(data===null||typeof data!=='object'||Array.isArray(data))throw new Error('request body must be an object');
       data={...data,protocol_version:3};
     }
@@ -94,13 +105,15 @@ export class Client {
     try{
       response=await fetch(this.url+path,{method:data===undefined?'GET':'POST',headers:{'Content-Type':'application/json',...(this.token?{Authorization:'Bearer '+this.token}:{})},body:data===undefined?undefined:JSON.stringify(data),signal:AbortSignal.timeout(10000)});
     }catch(error){
-      throw new Error(`cannot reach engine at ${this.url}; check the URL and that deoos-server is running`,{cause:error});
+      throw new Error(engineUnreachable(this.url??''),{cause:error});
     }
     if(!response.ok){
       const detail=(await response.text()).trim();
+      if(foreignBody(detail))throw new EngineError(response.status,engineWrongUrl(this.url??''));
       throw new EngineError(response.status,detail||response.statusText);
     }
-    return response.json();
+    try{return await response.json();}
+    catch{throw new EngineError(502,engineWrongUrl(this.url??''));}
   }
   submit(id:string,handler:string,inputs:unknown,max_attempts=3,retry_ms=0) { return this.request('/tasks',{id,handler,inputs,max_attempts,retry_ms}); }
   signal(id:string,name:string,value:unknown,operationId:string=randomUUID()){validStep(id);validStep(name);validStep(operationId);return this.request(`/tasks/${id}/signals/${name}`,{operation_id:operationId,value});}
@@ -189,7 +202,7 @@ export class Client {
   private async executeOnce(handlers:Record<string,Handler>,worker:string,recordedFailure?:(taskId:string)=>void):Promise<boolean> {
     const {task}=await this.request('/claim',{worker,handlers:Object.keys(handlers)});
     if(!task) return false;
-    if(task.version!==3) throw new Error("unsupported engine protocol version");
+    if(task.version!==3) throw new Error(protocolMismatch(task.version));
     const ctx=new Context(this,task);
     // Recursive timer prevents overlapping renewals; terminal writes retain renewals.
     let stopped=false, timer:ReturnType<typeof setTimeout>, renewal=Promise.resolve();
@@ -218,12 +231,12 @@ export class Context {
   private ownedUntil:number;
   constructor(public client:Client, public task:Task) {this.ownedUntil=task.expires_at;}
   get heartbeatMs(){return Math.max(100,(this.ownedUntil-Date.now())/3);}
-  checkOwner(){if(this.suspended)throw new Suspended();if(this.ownershipError) throw new Error('ownership renewal failed; stop work',{cause:this.ownershipError});}
+  checkOwner(){if(this.suspended)throw new Suspended();if(this.ownershipError) throw new Error(guide('OWNERSHIP_LOST','ownership renewal failed; stop work','the lease renewal did not succeed, so this attempt must not commit','stop this attempt and let a worker claim the task again. Raise LEASE_MS (minimum 1000) if renewals cannot keep up'),{cause:this.ownershipError});}
   private async currentState(){
     this.checkOwner();
     const state=await this.client.request(`/tasks/${this.task.id}`);
     if(state.status!=='running'||state.token!==this.task.token){
-      this.ownershipError=new EngineError(409,'task is no longer owned by this worker; stop this attempt and let a worker claim it again');
+      this.ownershipError=new EngineError(409,guide('OWNERSHIP_LOST','task is no longer owned by this worker; stop this attempt and let a worker claim it again','the lease ended or another worker claimed the task','stop this attempt. A worker can claim the task again after the lease'));
       throw this.ownershipError;
     }
     return state;

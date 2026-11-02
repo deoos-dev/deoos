@@ -19,6 +19,8 @@ import uuid
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "clients" / "python"))
+from deoos.errors import engine_unreachable
 PYTHONPATH = str(ROOT / "clients" / "python")
 ENGINE_URL = "http://127.0.0.1:7331"
 TASK = "resume-" + uuid.uuid4().hex[:8]
@@ -172,7 +174,7 @@ def refuse_connection():
     env = client_env()
     env["ENGINE_URL"] = f"http://127.0.0.1:{port}"
     result = cli(env, "info", check=False)
-    expected = f"cannot reach engine at http://127.0.0.1:{port}; run make dev\n"
+    expected = engine_unreachable(f"http://127.0.0.1:{port}") + "\n"
     if result.returncode != 1 or result.stderr != expected or result.stdout:
         raise AssertionError(
             f"refused connection was not a short error\n"
