@@ -1,6 +1,6 @@
 PYTHON ?= python3
 TEST_PYTHON ?= tests/.venv/bin/python
-.PHONY: build setup test-local test-aws test-cluster package test-package test-filesystem clean-local dev dev-down test-dev
+.PHONY: build setup test-local test-aws test-cluster package test-package test-filesystem clean-local dev dev-down test-dev eval
 
 build:
 	$(PYTHON) packaging/build_package.py --build-only
@@ -46,3 +46,6 @@ dev-down:
 
 test-dev:
 	$(PYTHON) tests/dev_cli.py
+
+eval:
+	$(TEST_PYTHON) evals/fresh-agent/harness.py --self-check --binary engine/target/release/deoos-server --backend rustfs --report outputs/evidence/fresh-agent-self-check.json

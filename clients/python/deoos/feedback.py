@@ -1,11 +1,14 @@
-"""File a deoos problem as a GitHub issue, or return a prefilled issue URL.
+"""File a deoos problem as a GitHub issue, or return the exact issue payload.
 
-The report contains the deoos version, what was tried, what happened, and an
-optional repro. It does not read the workflow, the working tree, or environment
-variables. Secret-like text is refused unless the caller sets include_secrets.
+The report contains the deoos version, the Python version, what was tried, what
+happened, and an optional repro. It does not read the workflow, the working
+tree, or environment variables. Secret-like text is refused unless the caller
+sets include_secrets, and the secret is not echoed. Filing is opt-in: the
+default is a dry run that returns the title, body, and labels.
 """
 import json
 import os
+import platform
 import re
 import urllib.error
 import urllib.parse
@@ -37,12 +40,40 @@ def deoos_version():
         return __version__
 
 
-def file_feedback(tried, happened, repro=None, include_secrets=False):
+def feedback_opt_in():
+    """True when the process opted in to creating a GitHub issue."""
+    return os.environ.get("DEOOS_FEEDBACK", "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def redact_text(text):
+    """Replace secret-like substrings. Returns the text and how many were replaced."""
+    if not isinstance(text, str):
+        return text, 0
+    count = 0
+
+    def replacer(_match):
+        nonlocal count
+        count += 1
+        return "[REDACTED]"
+
+    redacted = _SECRET.sub(replacer, text)
+    for name in _SECRET_ENV:
+        value = os.environ.get(name)
+        if value and len(value) >= 8 and value in redacted:
+            pieces = redacted.split(value)
+            count += len(pieces) - 1
+            redacted = "[REDACTED]".join(pieces)
+    return redacted, count
+
+
+def file_feedback(tried, happened, repro=None, include_secrets=False, *, send=False):
     tried = _text("tried", tried, required=True)
     happened = _text("happened", happened, required=True)
     repro = _text("repro", repro, required=False)
     if not isinstance(include_secrets, bool):
         raise ValueError("include_secrets must be a boolean")
+    if not isinstance(send, bool):
+        raise ValueError("send must be a boolean")
     body_text = "\n".join(part for part in (tried, happened, repro) if part)
     if not include_secrets and _looks_like_secret(body_text):
         raise ValueError(
@@ -52,26 +83,41 @@ def file_feedback(tried, happened, repro=None, include_secrets=False):
     version = deoos_version()
     title = _title(happened)
     body = _body(tried, happened, repro, version)
-    token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
+    labels = ["agent-feedback"]
     fallback = _prefilled_url(title, body)
+    payload = {
+        "filed": False,
+        "dry_run": not send,
+        "version": version,
+        "title": title,
+        "body": body,
+        "labels": labels,
+        "url": fallback,
+    }
+    if not send:
+        payload["note"] = (
+            "Dry run. Nothing was sent. Pass --send, or set DEOOS_FEEDBACK=1, "
+            "and set GITHUB_TOKEN or GH_TOKEN, to file this issue."
+        )
+        return payload
+    token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
     if not token:
-        return {
-            "filed": False,
-            "version": version,
-            "url": fallback,
-            "note": "No GITHUB_TOKEN or GH_TOKEN; open the url to file the issue. "
-                    "The title prefix lets the triage workflow add the agent-feedback label.",
-        }
+        payload["dry_run"] = False
+        payload["note"] = (
+            "No GITHUB_TOKEN or GH_TOKEN; open the url to file the issue. "
+            "The title prefix lets the triage workflow add the agent-feedback label."
+        )
+        return payload
     try:
         url = _create_issue(token, title, body)
     except Exception as error:
-        return {
-            "filed": False,
-            "version": version,
-            "url": fallback,
-            "note": f"GitHub API failed ({type(error).__name__}); open the url to file the issue.",
-        }
-    return {"filed": True, "version": version, "url": url, "note": "Filed with the agent-feedback label."}
+        payload["note"] = f"GitHub API failed ({type(error).__name__}); open the url to file the issue."
+        return payload
+    payload["filed"] = True
+    payload["dry_run"] = False
+    payload["url"] = url
+    payload["note"] = "Filed with the agent-feedback label."
+    return payload
 
 
 def _text(label, value, *, required):
@@ -128,6 +174,14 @@ def _body(tried, happened, repro, version):
     repro_text = repro if repro else (
         "_Not included. Pass repro only when it has no secrets and you mean to share it._"
     )
+    report = json.dumps({
+        "kind": "deoos-agent-feedback",
+        "deoos": version,
+        "python": platform.python_version(),
+        "tried": tried,
+        "happened": happened,
+        "repro": repro,
+    }, ensure_ascii=True, sort_keys=True)
     return "\n".join([
         MARKER,
         "",
@@ -142,10 +196,15 @@ def _body(tried, happened, repro, version):
         "",
         "## Environment",
         f"- deoos: {version}",
+        f"- python: {platform.python_version()}",
         f"- {_engine_line()}",
         "",
+        "## Report",
+        report,
+        "",
         "Sent by `python -m deoos feedback` or the MCP `feedback` tool. "
-        "The report is only the text above, the deoos version, and whether the engine responded.",
+        "The report is only the text above, the deoos version, the Python version, "
+        "and whether the engine responded.",
     ])
 
 

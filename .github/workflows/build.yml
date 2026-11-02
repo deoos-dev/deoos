@@ -91,6 +91,7 @@ jobs:
           python -m pip install outputs/release/deoos-*/python/*.whl
           python tests/mcp_behavior.py --binary engine/target/release/deoos-server --backend rustfs --report outputs/evidence/mcp-rustfs.json
           python tests/dev_cli.py
+          python evals/fresh-agent/harness.py --self-check --binary engine/target/release/deoos-server --backend rustfs --report outputs/evidence/fresh-agent-self-check.json
       - name: Capture RustFS logs and remove its volume
         if: always()
         run: |

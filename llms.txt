@@ -1,0 +1,56 @@
+# deoos
+
+> Durable execution on object storage. One Rust server keeps workflow state in your S3-compatible bucket. Python and TypeScript SDKs ship as GitHub release archives. State lives in that bucket; there is no database to run.
+
+deoos runs an ordinary function and remembers completed steps. A killed worker continues from the last committed step. Put each side effect in its own step. Replay returns the saved result and does not call the function again.
+
+## Docs
+
+- [Skill for coding agents](agents/SKILL.md): add deoos to a project, write a durable workflow, and debug a run
+- [README](README.md): install from a GitHub release archive, library mode, and server mode
+- [Agent feedback](docs/agent-feedback.md): how `deoos feedback` files a report and how to triage it
+- [Examples](https://github.com/deoos-dev/deoos-examples): runnable workflows, including an order flow and a payment resume
+
+## Install
+
+Do not use `pip install deoos` or `npm install deoos`. Download the archive for your OS and CPU from the GitHub release, then install the wheel and the Node tarball from that archive. The archive also contains `llms.txt` and `agents/`.
+
+## Run
+
+From a clone:
+
+```
+make dev
+export ENGINE_URL=http://127.0.0.1:7331
+export PYTHONPATH="$PWD/clients/python"
+python -m deoos info
+```
+
+`info` prints `"protocol_version": 3` when the engine is up.
+
+Server mode needs `ENGINE_URL` (and `ENGINE_TOKEN` when the server was started with one). Library mode needs `DEOOS_STORAGE_BUCKET` instead of a server. `DEOOS_MODE=library` ignores `ENGINE_URL`. `DEOOS_MODE=server` requires it.
+
+## MCP
+
+The MCP server is Python, over stdio, and it ships inside the release wheel. Coding agents launch it as a local process. It does not open a port and it does not run workers.
+
+```
+python -m deoos mcp --allow-actions
+```
+
+Read tools: `engine_health`, `docs_search`, `task_list`, `task_summary`, `task_history`.
+Action tools (need `--allow-actions`): `task_submit`, `task_cancel`, `task_retry`, `task_signal`.
+`feedback` is always available. It is a dry run unless `send` is true.
+
+## Feedback
+
+```
+python -m deoos feedback --tried "what you tried" --happened "what happened"
+python -m deoos feedback --send --tried "what you tried" --happened "what happened"
+```
+
+The first command prints the exact GitHub issue payload and files nothing. `--send` with `GITHUB_TOKEN` or `GH_TOKEN` files an issue in `deoos-dev/deoos` labeled `agent-feedback`. Secret-like text is refused and is not echoed.
+
+## Fresh-agent check
+
+`evals/fresh-agent/README.md` is the harness that scores "add deoos and survive a crash mid-step" against a real engine.

@@ -93,6 +93,12 @@ def main():
     feedback.add_argument(
         "--include-secrets", action="store_true",
         help="send the text even if it looks like a credential")
+    feedback.add_argument(
+        "--send", action="store_true",
+        help="file the GitHub issue; without this, print the payload and file nothing")
+    feedback.add_argument(
+        "--dry-run", action="store_true",
+        help="print the exact issue payload and do not call GitHub")
 
     args = parser.parse_args()
     agent = enabled(getattr(args, "agent", False))
@@ -101,11 +107,14 @@ def main():
         from .mcp import serve
         return serve(allow_actions=args.allow_actions, agent=agent)
     if args.command == "feedback":
-        from .feedback import file_feedback
+        from .feedback import feedback_opt_in, file_feedback
         progress("feedback", active=agent)
+        send = bool(args.send) or feedback_opt_in()
+        if args.dry_run:
+            send = False
         try:
             print(dumps(file_feedback(
-                args.tried, args.happened, args.repro, args.include_secrets), agent))
+                args.tried, args.happened, args.repro, args.include_secrets, send=send), agent))
         except Exception as error:
             print(str(error), file=sys.stderr)
             return 1

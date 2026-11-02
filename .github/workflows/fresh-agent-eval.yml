@@ -1,0 +1,68 @@
+name: Fresh-agent eval
+
+on:
+  workflow_dispatch:
+    inputs:
+      driver:
+        description: Shell command that writes app/workflow.py. See evals/fresh-agent/README.md.
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  RUST_VERSION: '1.93.1'
+
+jobs:
+  eval:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.13.16'
+      - name: Install Rust and build the server
+        run: |
+          rustup toolchain install "$RUST_VERSION" --profile minimal --no-self-update
+          rustup override set "$RUST_VERSION"
+          python -m pip install -r tests/requirements.txt
+          cargo +"$RUST_VERSION" build --release --locked --manifest-path engine/Cargo.toml
+      - name: Start RustFS
+        run: |
+          docker compose up -d
+          python - <<'PYTHON'
+          import time, boto3
+          s3 = boto3.client('s3', endpoint_url='http://127.0.0.1:19000',
+                            region_name='us-east-1', aws_access_key_id='local-development',
+                            aws_secret_access_key='local-development-only-secret')
+          for _ in range(60):
+              try:
+                  s3.list_buckets()
+                  break
+              except Exception:
+                  time.sleep(0.5)
+          else:
+              raise RuntimeError('RustFS did not become ready')
+          PYTHON
+      - name: Run the fresh-agent task
+        env:
+          DEOOS_EVAL_DRIVER: ${{ inputs.driver }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          OPENAI_BASE_URL: ${{ secrets.OPENAI_BASE_URL }}
+          OPENAI_MODEL: ${{ secrets.OPENAI_MODEL }}
+        run: |
+          python evals/fresh-agent/harness.py --run /tmp/deoos-fresh-eval \
+            --binary engine/target/release/deoos-server --backend rustfs \
+            --report outputs/evidence/fresh-agent-eval.json
+      - name: Upload the score
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: fresh-agent-${{ github.run_id }}
+          path: outputs/evidence/fresh-agent-eval.json
+          if-no-files-found: error
+          retention-days: 14
