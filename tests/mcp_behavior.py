@@ -35,7 +35,7 @@ from mcp.shared.exceptions import MCPError
 
 from local_faults import ROOT, Server, wait_marker, fault_target, assert_layout
 
-READ_TOOLS = {'task_list', 'task_summary', 'task_history'}
+READ_TOOLS = {'task_list', 'task_summary', 'task_history', 'engine_health', 'docs_search'}
 ACTION_TOOLS = {'task_cancel', 'task_retry', 'task_signal', 'task_submit'}
 FEEDBACK_TOOLS = {'feedback'}
 METADATA = {'id', 'handler', 'status', 'attempts', 'max_attempts', 'revision'}
@@ -65,7 +65,7 @@ def clean_env():
             and key not in {'ENGINE_URL', 'ENGINE_TOKEN', 'ENGINE_BIND', 'DEOOS_MODE',
                             'EXECUTION_PREFIX', 'LEASE_MS', 'PYTHONPATH',
                             'DEOOS_NATIVE_LIBRARY', 'DEOOS_NODE_LIBRARY',
-                            'GITHUB_TOKEN', 'GH_TOKEN', 'DEOOS_AGENT',
+                            'GITHUB_TOKEN', 'GH_TOKEN', 'DEOOS_AGENT', 'DEOOS_FEEDBACK',
                             'CURSOR_AGENT', 'CLAUDECODE', 'CODEX'}}
 
 
@@ -105,6 +105,7 @@ async def definitions(client, actions):
     tools = {tool.name: tool.model_dump(by_alias=True, exclude_none=True) for tool in result.tools}
     assert set(tools) == READ_TOOLS | FEEDBACK_TOOLS | (ACTION_TOOLS if actions else set()), tools
     required = {'task_list': set(), 'task_summary': {'id'}, 'task_history': {'id'},
+                'engine_health': set(), 'docs_search': {'query'},
                 'task_cancel': {'id'}, 'task_retry': {'id', 'expected_revision', 'operation_id'},
                 'task_signal': {'id', 'name', 'value', 'operation_id'},
                 'task_submit': {'id', 'handler', 'inputs'}}
@@ -114,7 +115,8 @@ async def definitions(client, actions):
         assert schema['type'] == 'object' and schema['additionalProperties'] is False
         if name == 'feedback':
             assert set(schema['required']) == {'tried', 'happened'}
-            assert set(schema['properties']) == {'tried', 'happened', 'repro', 'include_secrets'}
+            assert set(schema['properties']) == {
+                'tried', 'happened', 'repro', 'include_secrets', 'send', 'dry_run'}
             assert tool['annotations']['destructiveHint'] is False
             assert tool['annotations']['openWorldHint'] is True
             assert tool['annotations']['idempotentHint'] is False
@@ -308,9 +310,17 @@ print(json.dumps(c.inspect('completed')))
                 raise AssertionError(f'disabled action dispatched: {name}')
         missing = await call(client, tools, 'task_summary', {'id': 'missing'}, status=404)
         assert 'not found' in missing['error'] and 'list' in missing['error']
+        health = await call(client, tools, 'engine_health', {})
+        assert health['ok'] is True and health['protocol_version'] == 3
+        assert 'storage' in health and isinstance(health['storage'], dict)
+        docs = await call(client, tools, 'docs_search', {'query': 'wait_signal'})
+        assert docs['snippets'] and any('wait_signal' in item['text'] for item in docs['snippets'])
+        assert all(set(item) == {'source', 'heading', 'text'} for item in docs['snippets'])
         filed = await call(client, tools, 'feedback', {
             'tried': 'submit a workflow', 'happened': 'task id was rejected'})
-        assert filed['filed'] is False and filed['version']
+        assert filed['filed'] is False and filed['dry_run'] is True and filed['version']
+        assert filed['labels'] == ['agent-feedback'] and filed['title'].startswith('[agent-feedback]')
+        assert 'deoos-agent-feedback' in filed['body'] and 'submit a workflow' in filed['body']
         assert 'https://github.com/deoos-dev/deoos/issues/new?' in filed['url']
         decoded = urllib.parse.unquote(filed['url'])
         assert 'deoos-agent-feedback' in decoded and 'agent-feedback' in decoded

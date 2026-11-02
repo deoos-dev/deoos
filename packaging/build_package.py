@@ -18,6 +18,15 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 OUTPUTS = ROOT / "outputs" / "release"
 PYTHON_PACKAGE = ROOT / "clients/python"
 NODE_PACKAGE = ROOT / "clients/typescript"
+BUNDLED_DOCS = (
+    "llms.txt",
+    "README.md",
+    "agents/SKILL.md",
+    "docs/agent-feedback.md",
+    "agents/scripts/check_engine.py",
+    "agents/scripts/debug_run.py",
+    "agents/scripts/scaffold_workflow.py",
+)
 TARGETS = {
     "macos-arm64": (".dylib", "darwin", "arm64", "aarch64-apple-darwin"),
     "macos-x64": (".dylib", "darwin", "x64", "x86_64-apple-darwin"),
@@ -203,13 +212,29 @@ def package(label: str, suffix: str, npm_os: str, npm_cpu: str, explicit_target:
     shutil.copy2(ROOT / "README.md", release / "README.md")
     shutil.copy2(ROOT / "LICENSE", release / "LICENSE")
     shutil.copy2(ROOT / "compose.yaml", release / "compose.yaml")
+    shutil.copy2(ROOT / "llms.txt", release / "llms.txt")
+    for relative in ("agents/SKILL.md", "docs/agent-feedback.md", *BUNDLED_DOCS):
+        source = ROOT / relative
+        if not source.is_file():
+            raise SystemExit(f"Missing packaged doc: {relative}")
+        destination = release / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, destination)
     # Isolate the selected native artifact from cached libraries for other platforms.
     with tempfile.TemporaryDirectory(prefix="deoos-python-") as temp:
         stage = pathlib.Path(temp)
         for name in ("pyproject.toml", "setup.py"):
             shutil.copy2(PYTHON_PACKAGE / name, stage / name)
         shutil.copy2(ROOT / "LICENSE", stage / "LICENSE")
-        shutil.copytree(PYTHON_PACKAGE / "deoos", stage / "deoos", ignore=shutil.ignore_patterns("native", "__pycache__", "*.pyc"))
+        shutil.copytree(PYTHON_PACKAGE / "deoos", stage / "deoos", ignore=shutil.ignore_patterns("native", "bundled", "__pycache__", "*.pyc"))
+        bundle = stage / "deoos" / "bundled"
+        for relative in BUNDLED_DOCS:
+            source = ROOT / relative
+            if not source.is_file():
+                raise SystemExit(f"Missing bundled doc: {relative}")
+            destination = bundle / relative
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, destination)
         native = stage / "deoos/native"
         native.mkdir()
         name = library_name("deoos_engine", suffix)

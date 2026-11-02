@@ -11,4 +11,4 @@ license = "Apache-2.0"
 Homepage = "https://deoos.dev"
 Repository = "https://github.com/deoos-dev/deoos"
 [tool.setuptools.package-data]
-deoos = ["native/*.dylib", "native/*.so", "native/*.dll"]
+deoos = ["native/*.dylib", "native/*.so", "native/*.dll", "bundled/*", "bundled/*/*", "bundled/*/*/*", "bundled/*/*/*/*"]

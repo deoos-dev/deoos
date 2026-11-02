@@ -86,6 +86,9 @@ def client_env():
     env["PYTHONPATH"] = PYTHONPATH
     env.pop("ENGINE_TOKEN", None)
     env.pop("DEOOS_MODE", None)
+    env.pop("DEOOS_FEEDBACK", None)
+    env.pop("GITHUB_TOKEN", None)
+    env.pop("GH_TOKEN", None)
     for name in ("DEOOS_AGENT", "CURSOR_AGENT", "CLAUDECODE", "CODEX"):
         env.pop(name, None)
     return env
@@ -273,6 +276,21 @@ def main():
         decoded = urllib.parse.unquote(reported["url"])
         if "deoos-agent-feedback" not in decoded or "inspect a missing task" not in decoded:
             raise AssertionError(decoded)
+        if reported.get("dry_run") is not True or reported.get("labels") != ["agent-feedback"]:
+            raise AssertionError(reported)
+        if not str(reported.get("title", "")).startswith("[agent-feedback]"):
+            raise AssertionError(reported)
+        if "deoos-agent-feedback" not in reported.get("body", "") or "inspect a missing task" not in reported.get("body", ""):
+            raise AssertionError(reported)
+        if "should-not-appear-in-feedback" in json.dumps(reported):
+            raise AssertionError("feedback included ENGINE_TOKEN")
+        sent = cli_json(
+            feedback_env, "feedback", "--send", "--tried", "inspect a missing task",
+            "--happened", "404 not found")
+        if sent.get("filed") is not False or sent.get("dry_run") is not False or "issues/new" not in sent.get("url", ""):
+            raise AssertionError(sent)
+        if "No GITHUB_TOKEN" not in sent.get("note", ""):
+            raise AssertionError(sent)
         if "should-not-appear-in-feedback" in reported["url"] or "should-not-appear-in-feedback" in decoded:
             raise AssertionError("feedback included ENGINE_TOKEN")
         secret = cli(

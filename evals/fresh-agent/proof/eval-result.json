@@ -1,0 +1,46 @@
+{
+  "task": "crash-resume",
+  "task_id": "crash-f69b41320b5b",
+  "success": true,
+  "checks": {
+    "uses_deoos": true,
+    "work_once_before_restart": true,
+    "hold_started": true,
+    "work_not_repeated": true,
+    "hold_retried": true,
+    "completed": true,
+    "steps": true
+  },
+  "errors": [],
+  "inspect": {
+    "id": "crash-f69b41320b5b",
+    "status": "completed",
+    "output": "done",
+    "error": null,
+    "attempts": 2,
+    "completed_steps": [
+      "hold",
+      "work"
+    ],
+    "function": "survive"
+  },
+  "worker_log_tail": "",
+  "seconds": 2.449,
+  "mode": "score",
+  "backend": "rustfs",
+  "driver": null,
+  "sandbox_kept": false,
+  "agent": {
+    "model": "grok-4.7-medium",
+    "sandbox": "/tmp/deoos-fresh-eval",
+    "allowed_docs": [
+      "llms.txt",
+      "README.md",
+      "agents/SKILL.md",
+      "agents/scripts",
+      "docs/agent-feedback.md"
+    ],
+    "method": "ran agents/scripts/scaffold_workflow.py from the skill",
+    "note": "The grader then ran that file on deoos-server and RustFS. The agent was told not to read the repository."
+  }
+}

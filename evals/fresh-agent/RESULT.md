@@ -1,30 +1,12 @@
 # Fresh-agent result
 
-Run date: 2026-10-30. Engine: `make dev` at `http://127.0.0.1:7331`.
+The scored runs are in [proof/](proof/). Both used a real `deoos-server` and RustFS. The agent was a fresh model with a sandbox that contained only public docs. It was told not to read the repository.
 
-A fresh agent was given `PROMPT.txt`, `charge.py`, the repository README, and `agents/SKILL.md`. It was told not to read the engine, the SDKs, or the tests. It wrote `/tmp/fresh-agent/charge_durable.py`. That file uses `Client.remote`, `submit`, and one `ctx.step("charge", ...)`, and passes `ctx.idempotency_key("charge")` into the step. It is not a local retry loop.
+| Run | What the agent had | Result |
+| --- | --- | --- |
+| [proof/eval-prose.json](proof/eval-prose.json) | `llms.txt`, README, and the skill. No scripts. The agent wrote [proof/prose-workflow.py](proof/prose-workflow.py). | `success: true` in 2.443s. `errors` is empty. Task `crash-995a8d59561b` completed with output `done` after a kill during `hold`. The marker had one `work` line and two `hold` lines. |
+| [proof/eval-result.json](proof/eval-result.json) | The same docs plus `agents/scripts`. The agent ran `scaffold_workflow.py`. | `success: true` in 2.449s. Same crash-resume checks. |
 
-This environment still had the repository on disk. The instruction was not to open implementation files. The script matches the public skill. There is no proof the agent never opened another file.
+[proof/self-check.json](proof/self-check.json) is the CI grader, not a fresh agent. It runs the skill scaffold through the same checks. [proof/mcp-workflow.txt](proof/mcp-workflow.txt) is the MCP server driving that workflow. [proof/feedback-dry-run.json](proof/feedback-dry-run.json) is the issue payload. Nothing was filed. `gh` in this environment cannot create issues.
 
-The script was run once, unmodified, as task `charge-eval-1001`:
-
-```text
-{'order_id': 'order-1001', 'status': 'charged'}
-```
-
-`python -m deoos --agent inspect charge-eval-1001` (stderr: `deoos: inspect charge-eval-1001`):
-
-```json
-{"attempts":4,"completed_steps":["charge"],"error":"\"upstream timeout\"","function":"charge_order","id":"charge-eval-1001","inputs":{"order_id":"order-1001"},"output":{"order_id":"order-1001","status":"charged"},"status":"completed"}
-```
-
-History shows three `fail` events (`upstream timeout`), then one `checkpoint` named `charge`, then `complete`. A second run of the same task id returned the saved charge immediately and did not add another checkpoint.
-
-## Criteria
-
-1. Picks deoos: pass.
-2. Charge is one named step: pass.
-3. First run completes, and a later process returns the saved step: pass.
-4. No correction to the deoos API: pass. The script ran as written.
-
-Overall: pass, with the caveat that the agent shared a machine that contained the source tree.
+An earlier manual charge note from 2026-10-30 described a script written against the skill before this harness existed. The JSON files above are the runs to trust.

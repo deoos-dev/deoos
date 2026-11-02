@@ -168,7 +168,7 @@ The workflow APIs are the same in both modes. Use HTTPS through a TLS proxy acro
 - **Schedules:** fixed intervals, pause/resume and bounded backfills. Workers poll to admit due work; no separate scheduler service. No cron expressions or timezone/DST rules.
 - **Child workflows:** spawn tasks and join their results across workers.
 - **CLI and web UI:** inspect progress, read history, retry or cancel. Open `/ui` on a running server; internal details are separate from the default view.
-- **MCP:** `python -m deoos mcp` exposes read-only tools by default. `--allow-actions` adds submit, signal, retry, and cancel. `feedback` is always available. See [Agents](#agents).
+- **MCP:** `python -m deoos mcp` exposes read-only tools by default, including health, docs search, list, summary, and history. `--allow-actions` adds submit, signal, retry, and cancel. `feedback` is always available and files nothing unless `send` is set. See [Agents](#agents).
 
 ```sh
 python -m deoos inspect greeting-001
@@ -233,7 +233,7 @@ Copy [`agents/SKILL.md`](agents/SKILL.md) into a project so a coding agent can s
 }
 ```
 
-From a published install, drop `PYTHONPATH` and run the same module from the virtualenv that has the wheel. `--allow-actions` is required for `task_submit`, `task_signal`, and `task_retry`. Without it the server is read-only, plus `feedback`.
+From a published install, drop `PYTHONPATH` and run the same module from the virtualenv that has the wheel. The wheel is the MCP server: Python on stdio, no extra port, and no PyPI package. `--allow-actions` is required for `task_submit`, `task_signal`, `task_retry`, and `task_cancel`. Without it the server is read-only, plus `feedback`. `engine_health` and `docs_search` are in the read-only set. `llms.txt` in this repository and in the release archive is the index an agent can fetch first.
 
 `CURSOR_AGENT`, `CLAUDECODE`, `CODEX`, `DEOOS_AGENT=1`, or `--agent` selects agent mode: one JSON line on stdout, progress on stderr, and a `notice` when a list or history is capped instead of a silent cut. `DEOOS_AGENT=0` keeps the human layout. `explain` in agent mode is the summary JSON.
 
@@ -243,9 +243,10 @@ When an agent hits a sharp corner:
 
 ```sh
 python -m deoos feedback --tried "what you tried" --happened "what happened"
+python -m deoos feedback --send --tried "what you tried" --happened "what happened"
 ```
 
-With `GITHUB_TOKEN` or `GH_TOKEN` that files a GitHub issue in `deoos-dev/deoos` labeled `agent-feedback`. Without a token it prints a prefilled issue URL. The report is the text you pass, the deoos version, and whether the engine responded. It does not attach workflow payloads or environment variables. Secret-like text is refused unless you pass `--include-secrets`. Optional `--repro` is sent only when you set it. [docs/agent-feedback.md](docs/agent-feedback.md) is the triage path. [evals/fresh-agent/README.md](evals/fresh-agent/README.md) is the repeatable fresh-agent check.
+The first command prints the exact issue payload and files nothing. `--send` or `DEOOS_FEEDBACK=1`, together with `GITHUB_TOKEN` or `GH_TOKEN`, files a GitHub issue in `deoos-dev/deoos` labeled `agent-feedback`. Without a token it prints a prefilled issue URL. The report is the text you pass, the deoos version, the Python version, and whether the engine responded. It does not attach workflow payloads or environment variables. Secret-like text is refused and is not echoed unless you pass `--include-secrets`. Optional `--repro` is sent only when you set it. [docs/agent-feedback.md](docs/agent-feedback.md) is the triage path. [evals/fresh-agent/README.md](evals/fresh-agent/README.md) is the fresh-agent harness: it scores a crash mid-step against a real engine. [agents/SKILL.md](agents/SKILL.md) has the scripts that scaffold and debug a workflow.
 
 ## License
 

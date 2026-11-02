@@ -22,9 +22,17 @@ python -m deoos info
 
 Published wheels install with the commands in the repository README. `pip install deoos` does not install this project.
 
+## Scripts
+
+These sit next to this file. They use the same environment as the CLI.
+
+- `scripts/check_engine.py` — print `protocol_version` and exit 0 when it is 3.
+- `scripts/scaffold_workflow.py DIRECTORY` — write `workflow.py` that survives a kill inside the second step.
+- `scripts/debug_run.py TASK_ID` — print the summary and the retained history, including the last failure.
+
 ## MCP
 
-Read status with no extra flag. Start, signal, and resume need `--allow-actions`.
+The server is Python on stdio. It is the same process the CLI is, so it ships inside the release wheel and does not open a port. Read status with no extra flag. Start, signal, and resume need `--allow-actions`.
 
 ```json
 {
@@ -40,12 +48,16 @@ Read status with no extra flag. Start, signal, and resume need `--allow-actions`
 
 | Tool | What it does |
 | --- | --- |
+| `engine_health` | Protocol version and storage counters. No task payloads. |
+| `docs_search` | Short snippets from the bundled docs. Pass a query such as `wait_signal`. |
+| `task_list` | The first 100 task ids and a truncated flag. |
 | `task_submit` | Start a workflow. Same id, handler, and inputs returns the existing task. A different definition conflicts; pick a new id. |
 | `task_summary` | Status, completed steps, what it is waiting on, and the last failure. No inputs or outputs. |
 | `task_history` | Last 32 events and the revision required by retry. |
+| `task_cancel` | Cancel a task. Does not interrupt an effect that is already running. |
 | `task_signal` | Send a signal. Reuse the same `operation_id` and value if the response is uncertain. |
 | `task_retry` | Resume a failed or cancelled task. Pass `expected_revision` from `task_history`. |
-| `feedback` | File a problem. See below. |
+| `feedback` | File a problem. Dry run unless `send` is true. See below. |
 
 These tools do not execute the worker. After `task_submit`, run a worker until the task completes.
 
@@ -103,6 +115,9 @@ Use this when the error text is wrong, a tool is missing, or a run failed in a w
 
 ```sh
 python -m deoos feedback --tried "submit order-1001" --happened "inspect said not found"
+python -m deoos feedback --send --tried "submit order-1001" --happened "inspect said not found"
 ```
 
-The MCP tool is `feedback` with `tried` and `happened`. Optional `repro` is included only when set. `include_secrets: true` is the explicit override. No token prints a prefilled GitHub issue URL. `GITHUB_TOKEN` or `GH_TOKEN` files the issue on `deoos-dev/deoos` with the `agent-feedback` label.
+The first command is a dry run. It prints the exact issue title, body, and labels and files nothing. `--send`, or `DEOOS_FEEDBACK=1`, files the issue when `GITHUB_TOKEN` or `GH_TOKEN` is set. `--dry-run` forces the payload even if that opt-in is set. No token prints a prefilled GitHub issue URL.
+
+The MCP tool is `feedback` with `tried` and `happened`. Pass `send: true` to file. Optional `repro` is included only when set. `include_secrets: true` is the explicit override. Secret-like text is refused, nothing is filed, and the secret is not echoed. A filed issue is labeled `agent-feedback` on `deoos-dev/deoos`. The body includes a JSON report so matching failures can be grouped.

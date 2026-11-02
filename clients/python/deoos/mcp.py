@@ -1,5 +1,10 @@
 """Small MCP 2025-11-25 stdio adapter; no worker execution or HTTP listener.
 
+Python, because the operator CLI and the release wheel are already Python.
+stdio, because coding agents launch a local process and this adapter must not
+open a second port beside deoos-server. The wheel ships this module; the
+official MCP SDK is a test dependency only.
+
 Wire contract: modelcontextprotocol.io/specification/2025-11-25/basic/transports
 Only the classic initialization lifecycle is supported, not the 2026 protocol.
 """
@@ -35,8 +40,10 @@ INSTRUCTIONS = (
     "Signals also require a stable operation_id. Task cancellation cannot interrupt "
     "an external effect already running. Cancelling an MCP request or losing the "
     "connection does not roll back a task action. These tools do not run workers. "
-    "feedback files a report. It sends only the text you pass, the deoos version, "
-    "and whether the engine responded."
+    "engine_health reads protocol version and storage counters. docs_search returns "
+    "short documentation snippets and does not contact the network. feedback files "
+    "a report only when send is true. It sends only the text you pass, the deoos "
+    "version, and whether the engine responded."
 )
 
 
@@ -61,17 +68,24 @@ def tool_definitions(allow_actions=False):
               {"id": ID_SCHEMA}),
         _tool("task_history", "Read status, revision and the last 32 retained history events. "
               "This includes recorded logs, not process stdout or a complete audit trail.", {"id": ID_SCHEMA}),
+        _tool("engine_health", "Read engine health: protocol version and storage counters. "
+              "No task payloads or credentials.", {}),
+        _tool("docs_search", "Search bundled deoos docs and return short snippets. "
+              "Does not read the workflow or contact the engine.",
+              {"query": {"type": "string", "minLength": 1, "maxLength": 200}}),
     ]
     tools.append(_tool(
         "feedback",
-        "File this problem as a GitHub issue labeled agent-feedback. Sends the deoos version, "
-        "what you tried, and what happened. Optional repro is sent only when set. "
+        "File this problem as a GitHub issue labeled agent-feedback. Dry run unless send is true. "
+        "Sends the deoos version, what you tried, and what happened. Optional repro is sent only when set. "
         "Secrets and workflow payloads are refused unless include_secrets is true. "
         "Without GITHUB_TOKEN or GH_TOKEN, returns a prefilled issue URL.",
         {"tried": {"type": "string", "minLength": 1, "maxLength": 4000},
          "happened": {"type": "string", "minLength": 1, "maxLength": 4000},
          "repro": {"type": "string", "maxLength": 4000},
-         "include_secrets": {"type": "boolean"}},
+         "include_secrets": {"type": "boolean"},
+         "send": {"type": "boolean"},
+         "dry_run": {"type": "boolean"}},
         action=True, required=["tried", "happened"], destructive=False, idempotent=False))
     if allow_actions:
         tools += [
@@ -103,6 +117,43 @@ def _tool_result(value, error=False, *, agent=False):
 
 def _client_from_env():
     return client_from_environment()
+
+
+def _health(client):
+    info = client.request("/info")
+    if not isinstance(info, dict):
+        return {"ok": False, "error": "engine info was not an object"}
+    body = {
+        "ok": info.get("protocol_version") == 3,
+        "protocol_version": info.get("protocol_version"),
+    }
+    if "process_id" in info:
+        body["process_id"] = info["process_id"]
+    storage = info.get("storage")
+    if isinstance(storage, dict):
+        body["storage"] = _public_storage(storage)
+    return body
+
+
+def _public_storage(storage):
+    from .feedback import redact_text
+    safe = {}
+    for key, value in storage.items():
+        if key == "last_error" and isinstance(value, dict):
+            message = value.get("message")
+            if isinstance(message, str):
+                cleaned, _count = redact_text(message)
+                safe["last_error"] = {**{k: v for k, v in value.items() if k != "message"},
+                                      "message": cleaned[:500]}
+            else:
+                safe["last_error"] = value
+        elif key == "last_backoff" and isinstance(value, dict):
+            safe["last_backoff"] = {
+                field: value[field] for field in ("at_ms", "status", "seconds", "kind") if field in value
+            }
+        elif value is None or (isinstance(value, (int, float)) and not isinstance(value, bool)):
+            safe[key] = value
+    return safe
 
 
 class ProtocolError(Exception):
@@ -258,6 +309,11 @@ class Server:
             self._error(request_id, error.code, error.message)
 
     def _call(self, client, name, arguments):
+        if name == "engine_health":
+            return _health(client)
+        if name == "docs_search":
+            from .docs import search
+            return search(arguments["query"])
         if name == "task_list":
             result = client.list_tasks()
             body = {"tasks": [_metadata(task) for task in result["tasks"]], "truncated": result["truncated"]}
@@ -301,9 +357,13 @@ class Server:
                 if field in ("tried", "happened", "repro") and not isinstance(value, str):
                     raise ValueError(f"{field} must be a string")
                 continue
-            if field == "include_secrets":
+            if field == "query":
+                if not isinstance(value, str) or not value.strip() or len(value) > 200:
+                    raise ValueError("query must be a string of 1-200 characters")
+                continue
+            if field in ("include_secrets", "send", "dry_run"):
                 if not isinstance(value, bool):
-                    raise ValueError("include_secrets must be a boolean")
+                    raise ValueError(f"{field} must be a boolean")
                 continue
             try:
                 _valid_step(value)
@@ -329,7 +389,7 @@ class Server:
                     continue
                 try:
                     self._validate_arguments(name, arguments)
-                    if name != "feedback" and client is None:
+                    if name not in ("feedback", "docs_search") and client is None:
                         client = self.client_factory()
                     # Cancellation during initialization can still avoid dispatch.
                     if cancelled.is_set():
@@ -337,10 +397,14 @@ class Server:
                     else:
                         progress(name, arguments.get("id"), active=self.agent)
                         if name == "feedback":
-                            from .feedback import file_feedback
+                            from .feedback import feedback_opt_in, file_feedback
+                            send = bool(arguments.get("send", False)) or feedback_opt_in()
+                            if arguments.get("dry_run") is True:
+                                send = False
                             value = file_feedback(
                                 arguments["tried"], arguments["happened"],
-                                arguments.get("repro"), arguments.get("include_secrets", False))
+                                arguments.get("repro"), arguments.get("include_secrets", False),
+                                send=send)
                         else:
                             value = self._call(client, name, arguments)
                         result = _tool_result(value, agent=self.agent)
