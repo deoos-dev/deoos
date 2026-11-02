@@ -4,7 +4,7 @@
 
 Durable execution on object storage.
 
-Write ordinary functions that recover from failures. DEOOS saves completed steps and retries unfinished work, keeping workflow state in object storage—S3, Azure Blob, GCS, R2, or self-hosted RustFS. No database to manage.
+Write ordinary functions that recover from failures. DEOOS saves completed steps and retries unfinished work. State lives in your S3-compatible bucket—S3, Azure Blob, GCS, R2, or self-hosted RustFS. There is no database to run.
 
 [deoos.dev](https://deoos.dev)
 
