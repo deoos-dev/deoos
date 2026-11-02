@@ -1,6 +1,6 @@
 # deoos
 
-> Durable execution on object storage. One Rust server keeps workflow state in S3-compatible storage (RustFS in the examples). Python and TypeScript SDKs ship only as GitHub release archives, never as PyPI or npm packages. deoos is not DBOS and does not use Postgres.
+> Durable execution on object storage. One Rust server keeps workflow state in your S3-compatible bucket. Python and TypeScript SDKs ship as GitHub release archives. State lives in that bucket; there is no database to run.
 
 deoos runs an ordinary function and remembers completed steps. A killed worker continues from the last committed step. Put each side effect in its own step. Replay returns the saved result and does not call the function again.
 
