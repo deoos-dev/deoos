@@ -18,10 +18,26 @@ Write ordinary functions that recover from failures. DEOOS saves completed steps
 Runnable workflows are in [`examples/`](examples/README.md). Docker is the only prerequisite. From that directory:
 
 ```sh
-docker compose run --build --rm hacker-news
+docker compose run --build --rm agent-run-resume
 ```
 
-The container installs the pinned deoos release, starts a worker against local RustFS, and checks that a saved result survives a stopped worker. That compose file publishes RustFS on `127.0.0.1:19000`. Stop `make dev` first if that port is already taken.
+The container installs the pinned deoos release, starts a worker against local RustFS, and kills that worker after the draft is saved. The restart keeps those model calls and charges with the same idempotency key. The run prints `credits burned without deoos vs with: 3260 vs 1220`. That compose file publishes RustFS on `127.0.0.1:19000`. Stop `make dev` first if that port is already taken.
+
+### Examples
+
+These are the workflows to try first. Every command below runs from the `examples` directory.
+
+| Example | What it shows | Run |
+| --- | --- | --- |
+| [Agent run](examples/python/agent-run-resume/README.md) | Saved model calls and one charge key across a timeout (3260 credits when each crash starts over, 1220 with the saved steps). | `docker compose run --build --rm agent-run-resume` |
+| [Nightly batch](examples/python/nightly-batch-resume/README.md) | 10,000 emails, one send each, after the worker dies mid-batch and a second trigger joins the same task. | `docker compose run --build --rm nightly-batch-resume` |
+| [Offline approval](examples/python/offline-approval-ledger/README.md) | An air-gapped approval tied to one transfer, including a kill between the bank call and its checkpoint. | `./scripts/bundle_offline.sh`, then `docker load -i outputs/offline-bundle.tar` and `docker compose -f compose.offline.yaml run --rm offline-approval-ledger` |
+| [Multi-arch handoff](examples/python/multi-arch-handoff/README.md) | The same maintenance audit when the next worker is another CPU and the other SDK. | `docker compose up -d rustfs`, then `python tests/multi_arch_handoff_demo.py` |
+| [Document index](examples/python/document-index/README.md) | Documents already read stay read, including a crash after the index is published and before that checkpoint commits. | `docker compose run --build --rm document-index` |
+
+Python and TypeScript both run the agent, the nightly batch, the document index, and the multi-arch handoff. The offline approval ledger is Python. TypeScript commands are in each example README.
+
+Other examples: a greeting, an order, a payment replay, a Hacker News snapshot, a DEV article export, a refund, and HTTP integrations. Commands for those are in [`examples/README.md`](examples/README.md).
 
 For your own application, use the wheel or Node package from [Install](#install). These snippets use library mode with your bucket and cloud credentials.
 
@@ -254,7 +270,7 @@ With `GITHUB_TOKEN` or `GH_TOKEN` that files a GitHub issue in `hckshr/deoos` la
 
 ## Docs
 
-- [Examples](examples/README.md): runnable workflows, including order, payment resume, and a Hacker News snapshot
+- [Examples](examples/README.md): every runnable workflow, including the agent run, nightly batch, offline approval, multi-arch handoff, and document index
 - [Error codes](docs/errors.md): every server, CLI, and SDK code, and the fix
 - [Agent skill](agents/SKILL.md): how a coding agent starts, inspects, signals, and retries a workflow
 - [Agent feedback](docs/agent-feedback.md): how reports are filed and triaged
