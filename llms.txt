@@ -1,0 +1,22 @@
+# DEOOS
+
+> DEOOS is a durable execution engine. One Rust server runs ordinary functions, saves completed steps, and stores workflow state in your S3-compatible bucket (S3, Azure Blob, GCS, R2, or self-hosted RustFS). There is no database to run. Python and TypeScript SDKs ship only as GitHub release archives. They are not published to PyPI or npm.
+
+Release 0.8.0 is the current published build. Install it from the GitHub release archive after a SHA256SUMS check. Python 3.10+ and Node.js 22+ are required. Linux packages need glibc 2.28 or newer. `pip install deoos` and `npm install deoos` do not install this project. Library mode runs the engine inside the worker. Server mode runs `deoos-server` against the bucket; workers connect with `Client.remote` and need only the server URL and token.
+
+`python -m deoos mcp` is the MCP server in release 0.8.0. Default tools are `task_list`, `task_summary`, `task_history`, and `feedback`. `--allow-actions` adds `task_submit`, `task_signal`, `task_retry`, and `task_cancel`. Those action tools do not run a worker. `python -m deoos feedback --tried "..." --happened "..."` files a GitHub issue labeled `agent-feedback` when `GITHUB_TOKEN` or `GH_TOKEN` is set, and prints a prefilled issue URL otherwise.
+
+## Docs
+
+- [README](https://github.com/hckshr/deoos/blob/main/README.md): What DEOOS is, how to install it, a quick start, and the key concepts
+- [Examples](https://github.com/hckshr/deoos/blob/main/examples/README.md): Runnable workflows on RustFS and deoos-server, including crash and resume. Commands run from the `examples` directory
+- [Error codes](https://github.com/hckshr/deoos/blob/main/docs/errors.md): Every server, CLI, and SDK error code, and the fix. Anchors are `#CODE`
+- [Agent skill](https://github.com/hckshr/deoos/blob/main/agents/SKILL.md): How a coding agent starts, inspects, signals, and retries a workflow
+- [Agent feedback](https://github.com/hckshr/deoos/blob/main/docs/agent-feedback.md): How feedback reports are filed and triaged
+- [Fresh-agent check](https://github.com/hckshr/deoos/blob/main/evals/fresh-agent/README.md): Repeatable check for an agent that has not seen the repository
+
+## Repository
+
+- [deoos](https://github.com/hckshr/deoos): Rust engine, Python SDK, TypeScript SDK, examples, and the 0.8.0 release
+- [Release 0.8.0](https://github.com/hckshr/deoos/releases/tag/0.8.0): Archives, wheels, Node packages, and SHA256SUMS
+- [Agent feedback issues](https://github.com/hckshr/deoos/issues?q=label%3Aagent-feedback): Issues labeled agent-feedback

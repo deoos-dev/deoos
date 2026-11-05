@@ -1,7 +1,7 @@
 import { randomUUID, createHash } from 'node:crypto';
 import {createRequire} from 'node:module';
 const require=createRequire(import.meta.url);
-const DOCS='https://deoos.dev/errors#';
+const DOCS='https://github.com/hckshr/deoos/blob/main/docs/errors.md#';
 function guide(code:string,what:string,cause:string,fix:string){return `[${code}] ${what} Cause: ${cause} Fix: ${fix} ${DOCS}${code}`;}
 function engineUnreachable(url:string){return guide('ENGINE_UNREACHABLE',`cannot reach engine at ${url}`,'nothing accepted a connection. deoos-server is not running, or ENGINE_URL is the wrong host or port',"from a checkout run `make dev`, then set ENGINE_URL=http://127.0.0.1:7331. `python -m deoos info` should print protocol_version 3");}
 function engineWrongUrl(url:string){return guide('ENGINE_WRONG_URL',`ENGINE_URL ${url} responded but is not a deoos server`,'the URL points at a different service, such as RustFS on port 19000, or the response is not deoos JSON','set ENGINE_URL to the deoos-server origin only, usually http://127.0.0.1:7331 from `make dev`, with no path suffix. The server log prints `deoos-server listening`');}

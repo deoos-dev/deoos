@@ -1,0 +1,6 @@
+{
+  "hosts": [
+    {"name": "host-1", "package": "openssh", "installed": "9.0", "wanted": "9.1"},
+    {"name": "host-2", "package": "openssh", "installed": "9.0", "wanted": "9.1"}
+  ]
+}

@@ -1,0 +1,6 @@
+{
+  "invoice_id": "inv-100",
+  "payee": "Northwind Supply",
+  "amount_cents": 125000,
+  "currency": "USD"
+}

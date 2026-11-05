@@ -8,7 +8,7 @@ description = "DEOOS: durable execution on object storage"
 requires-python = ">=3.10"
 license = "Apache-2.0"
 [project.urls]
-Homepage = "https://deoos.dev"
-Repository = "https://github.com/deoos-dev/deoos"
+Homepage = "https://github.com/hckshr/deoos"
+Repository = "https://github.com/hckshr/deoos"
 [tool.setuptools.package-data]
 deoos = ["native/*.dylib", "native/*.so", "native/*.dll"]

@@ -311,7 +311,7 @@ print(json.dumps(c.inspect('completed')))
         filed = await call(client, tools, 'feedback', {
             'tried': 'submit a workflow', 'happened': 'task id was rejected'})
         assert filed['filed'] is False and filed['version']
-        assert 'https://github.com/deoos-dev/deoos/issues/new?' in filed['url']
+        assert 'https://github.com/hckshr/deoos/issues/new?' in filed['url']
         decoded = urllib.parse.unquote(filed['url'])
         assert 'deoos-agent-feedback' in decoded and 'agent-feedback' in decoded
         assert 'submit a workflow' in decoded and 'task id was rejected' in decoded

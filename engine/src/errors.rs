@@ -4,7 +4,9 @@ use object_store::Error as StoreError;
 use std::error::Error as StdError;
 
 pub fn text(code: &str, what: &str, cause: &str, fix: &str) -> String {
-    format!("[{code}] {what} Cause: {cause} Fix: {fix} https://deoos.dev/errors#{code}")
+    format!(
+        "[{code}] {what} Cause: {cause} Fix: {fix} https://github.com/hckshr/deoos/blob/main/docs/errors.md#{code}"
+    )
 }
 
 pub fn guide(
@@ -337,11 +339,11 @@ const DEFAULT: Known = Known {
     needle: "",
     code: "API_ERROR",
     cause: "the server rejected the request",
-    fix: "read the message, then run `python -m deoos --help`. Codes are listed at https://deoos.dev/errors",
+    fix: "read the message, then run `python -m deoos --help`. Codes are listed at https://github.com/hckshr/deoos/blob/main/docs/errors.md",
 };
 
 pub(crate) fn annotate(status: StatusCode, message: String) -> (StatusCode, String) {
-    if message.contains("https://deoos.dev/errors#") {
+    if message.contains("https://github.com/hckshr/deoos/blob/main/docs/errors.md#") {
         return (status, message);
     }
     let known = KNOWN

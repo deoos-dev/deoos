@@ -1,7 +1,7 @@
 """Actionable error text against a real deoos-server and RustFS. No mocks.
 
 Each case starts the release binary, or points a real SDK at one, and asserts
-the message names the code, the cause, the fix, and https://deoos.dev/errors#CODE.
+the message names the code, the cause, the fix, and https://github.com/hckshr/deoos/blob/main/docs/errors.md#CODE.
 """
 import json
 import os
@@ -46,7 +46,7 @@ def free_port():
 
 def assert_guide(text, code, *needles):
     missing = [needle for needle in (
-        f"[{code}]", f"https://deoos.dev/errors#{code}", "Cause:", "Fix:", *needles,
+        f"[{code}]", f"https://github.com/hckshr/deoos/blob/main/docs/errors.md#{code}", "Cause:", "Fix:", *needles,
     ) if needle not in text]
     if missing:
         raise AssertionError(f"{code} missing {missing} in:\n{text}")

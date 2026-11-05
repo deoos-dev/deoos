@@ -1,0 +1,7 @@
+.git
+.deoos
+.venv
+node_modules
+outputs
+**/__pycache__
+*.pyc
