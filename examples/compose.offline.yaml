@@ -1,0 +1,28 @@
+# Loaded from outputs/offline-bundle.tar. This file does not build images.
+# The network has no route to the public internet.
+name: deoos-offline
+
+networks:
+  airgap:
+    internal: true
+
+services:
+  rustfs:
+    image: rustfs/rustfs@sha256:8cc9801755448b71a786705ce76692c77e14936cccd87cf2fc31842e58f4d1ff
+    networks: [airgap]
+    environment:
+      RUSTFS_ACCESS_KEY: local-development
+      RUSTFS_SECRET_KEY: local-development-only-secret
+    volumes:
+      - rustfs-data:/data
+  offline-approval-ledger:
+    image: deoos-examples:offline
+    networks: [airgap]
+    init: true
+    depends_on: [rustfs]
+    volumes:
+      - ./outputs:/app/outputs
+    entrypoint: [deoos-demo, offline-approval-ledger]
+
+volumes:
+  rustfs-data:

@@ -1,0 +1,9 @@
+{
+  "name": "deoos-examples",
+  "private": true,
+  "description": "Runnable deoos examples. scripts/install_deoos.sh installs the pinned deoos release into node_modules.",
+  "dependencies": {
+    "@aws-sdk/client-s3": "3.1158.0",
+    "@duckdb/node-api": "1.5.6-r.1"
+  }
+}
