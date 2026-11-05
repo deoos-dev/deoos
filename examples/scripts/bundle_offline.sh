@@ -7,7 +7,7 @@ cd "$(dirname "$0")/.."
 
 version=$(awk -F= '$1=="version"{print $2}' deoos.lock)
 digest=sha256:8cc9801755448b71a786705ce76692c77e14936cccd87cf2fc31842e58f4d1ff
-base="https://github.com/deoos-dev/deoos/releases/download/${version}"
+base="https://github.com/hckshr/deoos/releases/download/${version}"
 dest=docker/offline-tarballs
 mkdir -p "$dest" outputs
 

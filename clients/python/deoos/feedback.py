@@ -13,7 +13,7 @@ import urllib.request
 
 from . import __version__
 
-REPO = "deoos-dev/deoos"
+REPO = "hckshr/deoos"
 MARKER = "<!-- deoos-agent-feedback -->"
 _SECRET = re.compile(
     r"(AKIA[0-9A-Z]{16}|ASIA[0-9A-Z]{16}|ghp_[A-Za-z0-9]{20,}|github_pat_|"

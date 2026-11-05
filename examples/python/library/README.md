@@ -4,7 +4,7 @@ You want one durable step without running a separate server. The engine runs ins
 
 ## Run
 
-From the repository root:
+From the `examples` directory:
 
 ```sh
 . ./scripts/prepare_local.sh

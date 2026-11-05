@@ -4,7 +4,7 @@ Same greeting as the Python library example, with the engine inside Node and the
 
 ## Run
 
-From the repository root:
+From the `examples` directory:
 
 ```sh
 . ./scripts/prepare_local.sh

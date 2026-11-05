@@ -6,7 +6,7 @@ The run has six steps over a local inventory: `inventory`, `backup`, `plan_updat
 
 ## Run
 
-From the repository root, with RustFS up. Register qemu when the host is not already the other architecture. The test builds amd64 and arm64 workers from the deoos 0.8.0 archive for that CPU, checks `SHA256SUMS`, and points both at one `deoos-server`:
+From the `examples` directory, with RustFS up. Register qemu when the host is not already the other architecture. The test builds amd64 and arm64 workers from the deoos 0.8.0 archive for that CPU, checks `SHA256SUMS`, and points both at one `deoos-server`:
 
 ```sh
 python tests/multi_arch_handoff_demo.py

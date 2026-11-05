@@ -55,7 +55,7 @@ jobs:
         run: |
           npm ci --prefix clients/typescript
           npm run build --prefix clients/typescript
-          python -m compileall -q clients/python packaging tests
+          python -m compileall -q clients/python packaging tests examples
       - name: Build native artifacts for behavioral tests
         timeout-minutes: 30
         run: |

@@ -23,11 +23,11 @@ export PYTHONPATH="$PWD/clients/python"
 
 Local RustFS uses the credentials in `compose.yaml`. Ambient AWS keys are not used. `LEASE_MS` (default 30000, minimum 1000) is the recovery lease and can be set when starting: `LEASE_MS=2000 make dev`.
 
-If the CLI is pointed at a server that is not running, it prints `ENGINE_UNREACHABLE`: cannot reach engine at `<url>`, then `make dev` and `https://deoos.dev/errors#ENGINE_UNREACHABLE`. Every code is listed in [docs/errors.md](docs/errors.md).
+If the CLI is pointed at a server that is not running, it prints `ENGINE_UNREACHABLE`: cannot reach engine at `<url>`, then `make dev` and `https://github.com/hckshr/deoos/blob/main/docs/errors.md#ENGINE_UNREACHABLE`. Every code is listed in [docs/errors.md](docs/errors.md).
 
 ## Run a workflow
 
-Runnable workflows live in [deoos-examples](https://github.com/deoos-dev/deoos-examples). The order example there can target this server with `DEOOS_MODE=server` and `ENGINE_URL=http://127.0.0.1:7331`.
+Runnable workflows live in [examples](examples/README.md). Run them from the `examples` directory. The order example can target this server with `DEOOS_MODE=server` and `ENGINE_URL=http://127.0.0.1:7331`.
 
 `python -m deoos submit` and `python -m deoos signal` are the CLI for this checkout. `inspect` shows the public view. `--internal` adds lease and storage fields.
 

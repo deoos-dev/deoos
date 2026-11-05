@@ -280,7 +280,7 @@ with Client(provider="azure", bucket="fake-container",
     except EngineError as error:
         assert error.status in (401, 403), error
         assert error.code == "STORAGE_CREDENTIALS", error
-        assert "https://deoos.dev/errors#STORAGE_CREDENTIALS" in str(error), error
+        assert "https://github.com/hckshr/deoos/blob/main/docs/errors.md#STORAGE_CREDENTIALS" in str(error), error
         assert "sig=" not in str(error) and "review-runtime-canary" not in str(error), error
     else:
         raise AssertionError("fake provider rejection unexpectedly succeeded")

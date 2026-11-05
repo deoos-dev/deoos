@@ -1,16 +1,62 @@
 # DEOOS
 
-[![Build and test](https://github.com/deoos-dev/deoos/actions/workflows/build.yml/badge.svg)](https://github.com/deoos-dev/deoos/actions/workflows/build.yml)
+<img src="brand/logo.svg" width="56" height="56" alt="DEOOS">
+
+[![Build and test](https://github.com/hckshr/deoos/actions/workflows/build.yml/badge.svg)](https://github.com/hckshr/deoos/actions/workflows/build.yml)
 
 Durable execution on object storage.
 
-Write ordinary functions that recover from failures. DEOOS saves completed steps and retries unfinished work. State lives in your S3-compatible bucket—S3, Azure Blob, GCS, R2, or self-hosted RustFS. There is no database to run.
+Write ordinary functions that recover from failures. DEOOS saves completed steps and retries unfinished work. State lives in your S3-compatible bucket: S3, Azure Blob, GCS, R2, or self-hosted RustFS. There is no database to run.
 
-[deoos.dev](https://deoos.dev)
+- Run it inside your app or as one small server
+- Python and TypeScript SDKs on a small Rust core
+- Timers, signals, schedules, and idempotency keys built in
+- See workflow progress from a CLI or web UI, whether you're a person or an agent
+
+## Quick start
+
+Runnable workflows are in [`examples/`](examples/README.md). Docker is the only prerequisite. From that directory:
+
+```sh
+docker compose run --build --rm hacker-news
+```
+
+The container installs the pinned deoos release, starts a worker against local RustFS, and checks that a saved result survives a stopped worker. That compose file publishes RustFS on `127.0.0.1:19000`. Stop `make dev` first if that port is already taken.
+
+For your own application, use the wheel or Node package from [Install](#install). These snippets use library mode with your bucket and cloud credentials.
+
+### Python
+
+```python
+from deoos import Client
+
+with Client(bucket="my-workflows", region="us-east-1") as engine:
+    def greet(ctx, inputs):
+        return ctx.step("greeting", lambda: f"Hello, {inputs['name']}!")
+
+    engine.submit("greeting-001", "greet", {"name": "World"})
+    engine.run_once({"greet": greet})
+    print(engine.view("greeting-001"))
+```
+
+### TypeScript
+
+```typescript
+import { Client } from "deoos";
+
+const engine = new Client({bucket: "my-workflows", region: "us-east-1"});
+await engine.submit("greeting-002", "greet", {name: "World"});
+await engine.runOnce({greet: async (ctx, inputs) =>
+  ctx.step("greeting", () => `Hello, ${inputs.name}!`)
+});
+console.log(await engine.view("greeting-002"));
+```
+
+The task ID identifies the work. Reusing it with the same definition returns the same task; use a new ID for new work. `run_once` / `runOnce` polls once. Use `run_worker` / `runWorker` for a continuous worker with application-controlled shutdown.
 
 ## Install
 
-Release [0.8.0](https://github.com/deoos-dev/deoos/releases/tag/0.8.0) is the current published build. Python 3.10+ and Node 22+ are required for the SDKs. A Rust compiler is not required.
+Release [0.8.0](https://github.com/hckshr/deoos/releases/tag/0.8.0) is the current published build. Python 3.10+ and Node 22+ are required for the SDKs. A Rust compiler is not required.
 
 `deoos` 0.8.0 is published as GitHub release archives. PyPI has no `deoos` package, and the npm registry has no `deoos` package. `pip install deoos` and `npm install deoos` do not install this project. Install the wheel and the Node tarball from the archive that matches your operating system and CPU.
 
@@ -22,14 +68,14 @@ Release [0.8.0](https://github.com/deoos-dev/deoos/releases/tag/0.8.0) is the cu
 | `deoos-0.8.0-macos-x64.tar.gz` | `deoos-0.8.0-py3-none-macosx_11_0_x86_64.whl` | `bin/deoos-server` | `node/deoos-0.8.0.tgz` (`os=darwin`, `cpu=x64`) |
 | `deoos-0.8.0-windows-x64.tar.gz` | `deoos-0.8.0-py3-none-win_amd64.whl` | `bin/deoos-server.exe` | `node/deoos-0.8.0.tgz` (`os=win32`, `cpu=x64`) |
 
-Linux packages need glibc 2.28 or newer. Release 0.8.0 has no Windows arm64 archive. Each Node tarball is built for one platform, and npm rejects a tarball from another operating system or CPU. The archive also contains `LICENSE`, `README.md`, `compose.yaml`, `SHA256SUMS`, and an `examples/` directory. Checksums for the archives are in [`SHA256SUMS`](https://github.com/deoos-dev/deoos/releases/download/0.8.0/SHA256SUMS).
+Linux packages need glibc 2.28 or newer. Release 0.8.0 has no Windows arm64 archive. Each Node tarball is built for one platform, and npm rejects a tarball from another operating system or CPU. The archive also contains `LICENSE`, `README.md`, `compose.yaml`, and `SHA256SUMS`. Checksums for the archives are in [`SHA256SUMS`](https://github.com/hckshr/deoos/releases/download/0.8.0/SHA256SUMS). Runnable workflows are in [`examples/`](examples/README.md).
 
 ### Linux and macOS
 
 ```sh
 set -euo pipefail
 VERSION=0.8.0
-BASE="https://github.com/deoos-dev/deoos/releases/download/${VERSION}"
+BASE="https://github.com/hckshr/deoos/releases/download/${VERSION}"
 case "$(uname -s)-$(uname -m)" in
   Linux-x86_64) target=linux-x64 ;;
   Linux-aarch64|Linux-arm64) target=linux-arm64 ;;
@@ -67,7 +113,7 @@ mkdir -p deoos-node-app
 $Version = "0.8.0"
 $Target = "windows-x64"
 $Archive = "deoos-$Version-$Target.tar.gz"
-$Base = "https://github.com/deoos-dev/deoos/releases/download/$Version"
+$Base = "https://github.com/hckshr/deoos/releases/download/$Version"
 $ErrorActionPreference = "Stop"
 Invoke-WebRequest -Uri "$Base/$Archive" -OutFile $Archive
 Invoke-WebRequest -Uri "$Base/SHA256SUMS" -OutFile SHA256SUMS
@@ -91,47 +137,6 @@ Pop-Location
 ```
 
 The 0.8.0 wheel's CLI commands are `list`, `info`, `mcp`, `inspect`, `history`, `summary`, `explain`, `retry`, `cancel`, `schedule`, `submit`, `signal`, and `feedback`. `library` uses in-process storage and ignores `ENGINE_URL`. `server` requires `ENGINE_URL`. With `DEOOS_MODE` unset, `ENGINE_URL` selects server mode and its absence selects library mode.
-
-## Quick start
-
-Runnable examples are in [deoos-examples](https://github.com/deoos-dev/deoos-examples). From a clone of that repository:
-
-```sh
-docker compose run --build --rm hacker-news
-```
-
-Docker is the only prerequisite. The container installs deoos, starts a worker against local RustFS, and checks that a saved result survives a stopped worker.
-
-For your own application, use the wheel or Node package from Install. These snippets use library mode with your bucket and cloud credentials.
-
-### Python
-
-```python
-from deoos import Client
-
-with Client(bucket="my-workflows", region="us-east-1") as engine:
-    def greet(ctx, inputs):
-        return ctx.step("greeting", lambda: f"Hello, {inputs['name']}!")
-
-    engine.submit("greeting-001", "greet", {"name": "World"})
-    engine.run_once({"greet": greet})
-    print(engine.view("greeting-001"))
-```
-
-### TypeScript
-
-```typescript
-import { Client } from "deoos";
-
-const engine = new Client({bucket: "my-workflows", region: "us-east-1"});
-await engine.submit("greeting-002", "greet", {name: "World"});
-await engine.runOnce({greet: async (ctx, inputs) =>
-  ctx.step("greeting", () => `Hello, ${inputs.name}!`)
-});
-console.log(await engine.view("greeting-002"));
-```
-
-The task ID identifies the work. Reusing it with the same definition returns the same task; use a new ID for new work. `run_once` / `runOnce` polls once. Use `run_worker` / `runWorker` for a continuous worker with application-controlled shutdown.
 
 ## Library mode
 
@@ -159,7 +164,7 @@ const engine = Client.remote("http://127.0.0.1:7331", "your-token");
 
 The workflow APIs are the same in both modes. Use HTTPS through a TLS proxy across machines; non-loopback binding requires a token.
 
-## Features
+## Key concepts
 
 - **Steps:** named checkpoints return saved results on recovery.
 - **Retries and leases:** failed or abandoned work can be claimed again, within its attempt budget. Idempotency keys help destinations deduplicate external effects.
@@ -177,7 +182,7 @@ python -m deoos inspect greeting-001 --internal
 python -m deoos info
 ```
 
-`info` shows engine health. In server mode it reads the running server’s counters; library-mode CLI commands create a fresh engine. Counters belong to each engine instance and reset when it is recreated. This repository's CLI reads `DEOOS_MODE`. `library` uses in-process storage and ignores `ENGINE_URL`. `server` requires `ENGINE_URL`. With `DEOOS_MODE` unset, `ENGINE_URL` selects server mode and its absence selects library mode. Runnable workflows for both SDKs are in [deoos-examples](https://github.com/deoos-dev/deoos-examples).
+`info` shows engine health. In server mode it reads the running server’s counters; library-mode CLI commands create a fresh engine. Counters belong to each engine instance and reset when it is recreated. This repository's CLI reads `DEOOS_MODE`. `library` uses in-process storage and ignores `ENGINE_URL`. `server` requires `ENGINE_URL`. With `DEOOS_MODE` unset, `ENGINE_URL` selects server mode and its absence selects library mode. Runnable workflows for both SDKs are in [`examples/`](examples/README.md).
 
 ## Idempotency across long pauses
 
@@ -186,7 +191,7 @@ Inside a step, pass `ctx.idempotency_key("charge")` / `ctx.idempotencyKey("charg
 That key stays the same across retries and resumes and covers the gap between the call and its committed result, while the provider retains the key.
 After the provider's key window expires, an unfinished step in that gap needs a reconciliation check before calling again.
 Use globally unique execution IDs when sharing an external account; step keys do not include the bucket or prefix.
-Keep saved workflow state for the full pause. The payment demo in [deoos-examples](https://github.com/deoos-dev/deoos-examples) replays a saved charge after that window: `docker compose run --build --rm payment-resume`.
+Keep saved workflow state for the full pause. The payment demo in [`examples/python/payment`](examples/python/payment/README.md) replays a saved charge after that window. From the `examples` directory: `docker compose run --build --rm payment-resume`.
 
 ## Guarantees and limits
 
@@ -215,7 +220,7 @@ python -m deoos submit TASK_ID HANDLER '{"key":"value"}'
 python -m deoos signal TASK_ID SIGNAL_NAME true
 ```
 
-`submit`, `signal`, and `feedback` are in the 0.8.0 CLI. A refused connection prints `ENGINE_UNREACHABLE` (`cannot reach engine at <url>`) and tells you to run `make dev`. Other failures use the same shape: what happened, the likely cause, a concrete fix, a stable code, and `https://deoos.dev/errors#CODE`. The catalog is [docs/errors.md](docs/errors.md). `AGENTS.md` is the kill-and-resume check for this server. `make test-dev` runs that check against the real engine.
+`submit`, `signal`, and `feedback` are in the 0.8.0 CLI. A refused connection prints `ENGINE_UNREACHABLE` (`cannot reach engine at <url>`) and tells you to run `make dev`. Other failures use the same shape: what happened, the likely cause, a concrete fix, a stable code, and `https://github.com/hckshr/deoos/blob/main/docs/errors.md#CODE`. The catalog is [docs/errors.md](docs/errors.md). `AGENTS.md` is the kill-and-resume check for this server. `make test-dev` runs that check against the real engine.
 
 ## Agents
 
@@ -245,7 +250,15 @@ When an agent hits a sharp corner:
 python -m deoos feedback --tried "what you tried" --happened "what happened"
 ```
 
-With `GITHUB_TOKEN` or `GH_TOKEN` that files a GitHub issue in `deoos-dev/deoos` labeled `agent-feedback`. Without a token it prints a prefilled issue URL. The report is the text you pass, the deoos version, and whether the engine responded. It does not attach workflow payloads or environment variables. Secret-like text is refused unless you pass `--include-secrets`. Optional `--repro` is sent only when you set it. [docs/agent-feedback.md](docs/agent-feedback.md) is the triage path. [evals/fresh-agent/README.md](evals/fresh-agent/README.md) is the repeatable fresh-agent check.
+With `GITHUB_TOKEN` or `GH_TOKEN` that files a GitHub issue in `hckshr/deoos` labeled `agent-feedback`. Without a token it prints a prefilled issue URL. The report is the text you pass, the deoos version, and whether the engine responded. It does not attach workflow payloads or environment variables. Secret-like text is refused unless you pass `--include-secrets`. Optional `--repro` is sent only when you set it. [docs/agent-feedback.md](docs/agent-feedback.md) is the triage path. [evals/fresh-agent/README.md](evals/fresh-agent/README.md) is the repeatable fresh-agent check.
+
+## Docs
+
+- [Examples](examples/README.md): runnable workflows, including order, payment resume, and a Hacker News snapshot
+- [Error codes](docs/errors.md): every server, CLI, and SDK code, and the fix
+- [Agent skill](agents/SKILL.md): how a coding agent starts, inspects, signals, and retries a workflow
+- [Agent feedback](docs/agent-feedback.md): how reports are filed and triaged
+- [llms.txt](llms.txt): the short map of those pages for agents
 
 ## License
 

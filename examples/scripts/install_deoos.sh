@@ -19,7 +19,7 @@ case "$os-$arch" in
   *) echo "No ${version} build for $os $arch. Shipped: linux-x64, linux-arm64, macos-arm64, macos-x64, windows-x64." >&2; exit 1 ;;
 esac
 archive="deoos-${version}-${target}.tar.gz"
-base="https://github.com/deoos-dev/deoos/releases/download/${version}"
+base="https://github.com/hckshr/deoos/releases/download/${version}"
 
 mkdir -p .deoos/cache .deoos/release .venv
 if ! [ -x .deoos/release/bin/deoos-server ] || ! grep -qx "$version $git_ref" .deoos/VERSION 2>/dev/null; then

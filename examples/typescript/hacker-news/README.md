@@ -4,7 +4,7 @@ Same DuckDB snapshot as the Python example. The Docker command runs the recovery
 
 ## Run
 
-From the repository root, after `. ./scripts/prepare_local.sh` and with `deoos-server` listening:
+From the `examples` directory, after `. ./scripts/prepare_local.sh` and with `deoos-server` listening:
 
 ```sh
 export DEOOS_MODE=server ENGINE_URL=http://127.0.0.1:7331 ENGINE_TOKEN=dev-token

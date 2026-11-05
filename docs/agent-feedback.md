@@ -14,8 +14,8 @@ It does not read the workflow, the working tree, environment variables, or task 
 
 ## Transport
 
-1. If `GITHUB_TOKEN` or `GH_TOKEN` is set, the command creates a GitHub issue in `deoos-dev/deoos` and adds the `agent-feedback` label (creating that label when the token is allowed to).
-2. Otherwise it prints a prefilled `https://github.com/deoos-dev/deoos/issues/new` URL and does not call GitHub. The title starts with `[agent-feedback]` and the body contains `<!-- deoos-agent-feedback -->`.
+1. If `GITHUB_TOKEN` or `GH_TOKEN` is set, the command creates a GitHub issue in `hckshr/deoos` and adds the `agent-feedback` label (creating that label when the token is allowed to).
+2. Otherwise it prints a prefilled `https://github.com/hckshr/deoos/issues/new` URL and does not call GitHub. The title starts with `[agent-feedback]` and the body contains `<!-- deoos-agent-feedback -->`.
 
 Opening that URL still requires a person or agent with permission to create the issue. The query string also asks GitHub for the `agent-feedback` label; GitHub applies it when the opener is allowed to set labels.
 
@@ -28,7 +28,7 @@ The same form is in `.github/ISSUE_TEMPLATE/agent-feedback.yml` for a person fil
 Group and fix:
 
 1. Confirm the report has no secrets. If it does, delete the secret text before discussing it.
-2. Filter issues with the `agent-feedback` label: `https://github.com/deoos-dev/deoos/issues?q=label%3Aagent-feedback`
+2. Filter issues with the `agent-feedback` label: `https://github.com/hckshr/deoos/issues?q=label%3Aagent-feedback`
 3. Group issues that describe the same failure (same error text, same command, same status).
 4. Fix that corner in the server, CLI, or SDK. Cover it with a behavioral test against a real engine.
 5. Close the grouped issues with the commit or pull request link.

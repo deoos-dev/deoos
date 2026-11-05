@@ -127,7 +127,9 @@ async fn main() {
             match result {
                 Ok(report) => println!("{}", serde_json::to_string_pretty(&report).unwrap()),
                 Err(error) => {
-                    let message = if error.contains("https://deoos.dev/errors#") {
+                    let message = if error
+                        .contains("https://github.com/hckshr/deoos/blob/main/docs/errors.md#")
+                    {
                         error
                     } else {
                         deoos_engine::error_text(
@@ -145,7 +147,7 @@ async fn main() {
         }
         Some("--help") | Some("-h") => {
             println!(
-                "deoos-server: object-storage-backed execution service\n\nConfiguration via environment:\n  DEOOS_STORAGE_PROVIDER: s3 (default), gcs, azure or filesystem\n  DEOOS_STORAGE_DIRECTORY: required for filesystem storage\n    Experimental macOS/APFS backend; qualified on Apple Silicon\n  DEOOS_STORAGE_BUCKET: bucket/container\n  GOOGLE_* or AZURE_* native credentials for their providers\n  AWS_REGION, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY for S3\n  AWS_SESSION_TOKEN for temporary credentials\n  AWS_ENDPOINT and AWS_ALLOW_HTTP=true for local S3-compatible storage\n  EXECUTION_PREFIX (default deoos)\n  ENGINE_BIND (default 127.0.0.1:7331)\n  ENGINE_TOKEN required for non-loopback server-mode access\n  LEASE_MS (default 30000)\n\nUse the Python or TypeScript SDK to submit and execute tasks.\n--check-storage tests conditional writes and read/list consistency in an isolated temporary namespace.\nError codes: https://deoos.dev/errors and docs/errors.md in a checkout."
+                "deoos-server: object-storage-backed execution service\n\nConfiguration via environment:\n  DEOOS_STORAGE_PROVIDER: s3 (default), gcs, azure or filesystem\n  DEOOS_STORAGE_DIRECTORY: required for filesystem storage\n    Experimental macOS/APFS backend; qualified on Apple Silicon\n  DEOOS_STORAGE_BUCKET: bucket/container\n  GOOGLE_* or AZURE_* native credentials for their providers\n  AWS_REGION, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY for S3\n  AWS_SESSION_TOKEN for temporary credentials\n  AWS_ENDPOINT and AWS_ALLOW_HTTP=true for local S3-compatible storage\n  EXECUTION_PREFIX (default deoos)\n  ENGINE_BIND (default 127.0.0.1:7331)\n  ENGINE_TOKEN required for non-loopback server-mode access\n  LEASE_MS (default 30000)\n\nUse the Python or TypeScript SDK to submit and execute tasks.\n--check-storage tests conditional writes and read/list consistency in an isolated temporary namespace.\nError codes: https://github.com/hckshr/deoos/blob/main/docs/errors.md and docs/errors.md in a checkout."
             );
             return;
         }

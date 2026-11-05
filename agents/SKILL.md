@@ -18,7 +18,7 @@ export PYTHONPATH="$PWD/clients/python"
 python -m deoos info
 ```
 
-`info` must print `"protocol_version": 3`. If the CLI says `ENGINE_UNREACHABLE` or `cannot reach engine`, run `make dev` again and export `ENGINE_URL`. Server mode needs only `ENGINE_URL` (and `ENGINE_TOKEN` when the server was started with one). Library mode needs `DEOOS_STORAGE_BUCKET` instead of `ENGINE_URL`. Error codes and fixes are at `https://deoos.dev/errors#CODE` and in `docs/errors.md` of a checkout.
+`info` must print `"protocol_version": 3`. If the CLI says `ENGINE_UNREACHABLE` or `cannot reach engine`, run `make dev` again and export `ENGINE_URL`. Server mode needs only `ENGINE_URL` (and `ENGINE_TOKEN` when the server was started with one). Library mode needs `DEOOS_STORAGE_BUCKET` instead of `ENGINE_URL`. Error codes and fixes are at `https://github.com/hckshr/deoos/blob/main/docs/errors.md#CODE` and in `docs/errors.md` of a checkout.
 
 Published wheels install with the commands in the repository README. `pip install deoos` does not install this project.
 
@@ -87,7 +87,7 @@ Agent mode prints one JSON line on stdout and one progress line on stderr (`deoo
 
 The error text says what is wrong and the next command. Common cases:
 
-- `ENGINE_UNREACHABLE` / `cannot reach engine` — start the server (`make dev`) and export `ENGINE_URL`. See `https://deoos.dev/errors#ENGINE_UNREACHABLE`.
+- `ENGINE_UNREACHABLE` / `cannot reach engine` — start the server (`make dev`) and export `ENGINE_URL`. See `https://github.com/hckshr/deoos/blob/main/docs/errors.md#ENGINE_UNREACHABLE`.
 - `STORAGE_UNREACHABLE`, `STORAGE_CREDENTIALS`, or `STORAGE_BUCKET_MISSING` — RustFS or the bucket is down, the keys do not match `compose.yaml`, or `DEOOS_STORAGE_BUCKET` was not created. `make dev` starts RustFS and creates `deoos-dev`.
 - `PROTOCOL_MISMATCH` — install the SDK from the same GitHub release archive as `deoos-server --version`. Do not use PyPI or npm.
 - `WORKFLOW_NONDETERMINISTIC` — a replay changed a step's kind or revision. Keep them stable, or submit a new task id.
@@ -108,4 +108,4 @@ Use this when the error text is wrong, a tool is missing, or a run failed in a w
 python -m deoos feedback --tried "submit order-1001" --happened "inspect said not found"
 ```
 
-The MCP tool is `feedback` with `tried` and `happened`. Optional `repro` is included only when set. `include_secrets: true` is the explicit override. No token prints a prefilled GitHub issue URL. `GITHUB_TOKEN` or `GH_TOKEN` files the issue on `deoos-dev/deoos` with the `agent-feedback` label.
+The MCP tool is `feedback` with `tried` and `happened`. Optional `repro` is included only when set. `include_secrets: true` is the explicit override. No token prints a prefilled GitHub issue URL. `GITHUB_TOKEN` or `GH_TOKEN` files the issue on `hckshr/deoos` with the `agent-feedback` label.

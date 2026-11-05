@@ -1,8 +1,8 @@
 # deoos examples
 
-Runnable examples for [deoos](https://github.com/deoos-dev/deoos) 0.8.0. The Python and Node SDKs are not on PyPI or npm. `pip install deoos` and `npm install deoos` do not install this project.
+Runnable examples for [deoos](../README.md) 0.8.0. They live in this repository under `examples/`. Run the commands in this tree from this directory. The Python and Node SDKs are not on PyPI or npm. `pip install deoos` and `npm install deoos` do not install this project.
 
-`scripts/install_deoos.sh` follows the install in the [deoos README](https://github.com/deoos-dev/deoos#install): download the release archive for this machine, check `SHA256SUMS`, then install that wheel, that Node tarball, and `deoos-server`. The Docker image does the same check. `deoos.lock` pins version `0.8.0`, git `6368fb380d422724ad1db40267abeebc68c94db0`.
+`scripts/install_deoos.sh` follows the [install](../README.md#install) in the repository README: download the release archive for this machine, check `SHA256SUMS`, then install that wheel, that Node tarball, and `deoos-server`. The Docker image does the same check. `deoos.lock` pins version `0.8.0`, git `6368fb380d422724ad1db40267abeebc68c94db0`. These examples install that published release. The source packages used to build deoos are `clients/python` and `clients/typescript` at the repository root.
 
 Each example runs on real RustFS and the published `deoos-server`. Library hello is the exception: the same engine runs inside the process and still stores the step in RustFS. Nothing here mocks the engine. External HTTP targets in the payment, mail, agent, and integration demos are local stand-ins so the tests can crash a call on purpose.
 
@@ -12,7 +12,7 @@ Each example runs on real RustFS and the published `deoos-server`. Library hello
 . ./scripts/prepare_local.sh
 ```
 
-That installs deoos, starts RustFS on `127.0.0.1:19000`, creates the bucket `deoos-examples`, and exports the local storage variables. Leave that shell open.
+That installs deoos, starts RustFS on `127.0.0.1:19000`, creates the bucket `deoos-examples`, and exports the local storage variables. Leave that shell open. This `compose.yaml` publishes the same host ports as the repository root `compose.yaml`. If `make dev` is already using port 19000, run `make dev-down` from the repository root first.
 
 `docker compose up -d` starts only RustFS. The demo services build `docker/Dockerfile` and run the checks under `tests/`. Results stay in `outputs/`.
 
@@ -38,6 +38,6 @@ Python and TypeScript implement the same workflows, except Counting House, which
 
 ## Tests
 
-`./scripts/test.sh` runs every example above against RustFS. GitHub Actions runs that script on pull requests and on pushes to `main`, then `docker compose run --build --rm counting-house`. The approval test builds `outputs/offline-bundle.tar` and runs it on an internal network. The handoff test builds the amd64 and arm64 workers and points both at `deoos-server`.
+`./scripts/test.sh` runs every example above against RustFS. [`.github/workflows/examples.yml`](../.github/workflows/examples.yml) runs that script on pull requests and on pushes to `main`, then `docker compose run --build --rm counting-house`. The approval test builds `outputs/offline-bundle.tar` and runs it on an internal network. The handoff test builds the amd64 and arm64 workers and points both at `deoos-server`.
 
 Start RustFS first (`docker compose up -d rustfs`, or the setup command above).

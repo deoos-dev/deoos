@@ -29,7 +29,7 @@ RUN set -eu; \
       cp "/tmp/offline-tarballs/$archive" "/tmp/release/$archive"; \
       cp /tmp/offline-tarballs/SHA256SUMS /tmp/release/SHA256SUMS; \
     else \
-      base="https://github.com/deoos-dev/deoos/releases/download/${DEOOS_VERSION}"; \
+      base="https://github.com/hckshr/deoos/releases/download/${DEOOS_VERSION}"; \
       curl -fL --retry 3 "${base}/${archive}" -o "/tmp/release/$archive"; \
       curl -fsSL --retry 3 "${base}/SHA256SUMS" -o /tmp/release/SHA256SUMS; \
     fi; \

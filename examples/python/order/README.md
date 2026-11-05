@@ -4,7 +4,7 @@ An order has to survive a stopped worker: validate and price as child tasks, wai
 
 ## Run
 
-From the repository root:
+From the `examples` directory:
 
 ```sh
 . ./scripts/prepare_local.sh

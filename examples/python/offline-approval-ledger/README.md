@@ -6,7 +6,7 @@ An approval that nobody can tie back to the transfer is not an approval. The wor
 
 ## Run
 
-On a connected machine, from the repository root:
+On a connected machine, from the `examples` directory:
 
 ```sh
 ./scripts/bundle_offline.sh

@@ -4,7 +4,7 @@ You want the worker to greet someone without holding storage credentials. `deoos
 
 ## Run
 
-From the repository root, install deoos 0.8.0 (release archive and `SHA256SUMS`) and start RustFS:
+From the `examples` directory, install deoos 0.8.0 (release archive and `SHA256SUMS`) and start RustFS:
 
 ```sh
 . ./scripts/prepare_local.sh

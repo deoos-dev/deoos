@@ -1,6 +1,6 @@
 """Stable, actionable error text shared by the CLI and the Python SDK."""
 
-DOCS = "https://deoos.dev/errors#"
+DOCS = "https://github.com/hckshr/deoos/blob/main/docs/errors.md#"
 
 
 def guide(code, what, cause, fix):
